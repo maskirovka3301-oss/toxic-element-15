@@ -100,7 +100,7 @@ typedef struct {
     char signal_type[64];
     char modulation[64];
     int match_count;
-    char matches[10][64];
+    char matches[10][128];
     int match_confidence[10];
     float *waterfall_image;
     int image_frames;
@@ -285,21 +285,214 @@ static double calculate_prf(float *data, int frames, double time_per_frame) {
 
 static void match_known_signals(SDRAnalyzer *a, double center_freq, double bandwidth) {
     a->analysis.match_count = 0;
-    struct { const char *name; double freq_min; double freq_max; double bw_min; double bw_max; } signals[] = {
-        {"5G NR Downlink", 2300e6, 2690e6, 5e6, 100e6}, {"5G NR Uplink", 2300e6, 2690e6, 5e6, 100e6},
-        {"4G LTE Downlink", 2300e6, 2690e6, 1.4e6, 20e6}, {"4G LTE Uplink", 2300e6, 2690e6, 1.4e6, 20e6},
-        {"WiFi 802.11n/g", 2400e6, 2483.5e6, 20e6, 40e6}, {"WiFi 802.11ac/ax", 2400e6, 2483.5e6, 20e6, 160e6},
-        {"Logitech Wireless", 2400e6, 2483.5e6, 500e3, 2e6}, {"Zigbee", 2400e6, 2483.5e6, 2e6, 2e6},
-        {"Bluetooth Classic", 2400e6, 2483.5e6, 1e6, 3e6}, {"Bluetooth LE", 2400e6, 2483.5e6, 1e6, 2e6},
+    
+    struct { 
+        const char *name; 
+        double freq_min; 
+        double freq_max; 
+        double bw_min; 
+        double bw_max;
+        const char *band;
+    } signals[] = {
+        // VLF (3-30 kHz)
+        {"VLF Navigation Beacon", 3e3, 30e3, 10, 500, "VLF"},
+        {"VLF Time Signal", 3e3, 30e3, 10, 100, "VLF"},
+        {"Submarine Communication", 3e3, 30e3, 50, 1000, "VLF"},
+        
+        // LF (30-300 kHz)
+        {"Longwave Broadcast", 30e3, 300e3, 5e3, 10e3, "LF"},
+        {"LORAN-C", 90e3, 110e3, 1e3, 5e3, "LF"},
+        {"Non-Directional Beacon (NDB)", 190e3, 535e3, 500, 2e3, "LF"},
+        {"Time Signal (WWVB)", 60e3, 60e3, 100, 500, "LF"},
+        
+        // MF (300-3000 kHz)
+        {"AM Broadcast", 530e3, 1700e3, 5e3, 10e3, "MF"},
+        {"Maritime Mobile", 1.6e6, 4e6, 2e3, 6e3, "MF"},
+        {"Aviation NDB", 190e3, 535e3, 500, 2e3, "MF"},
+        {"Amateur Radio 160m", 1.8e6, 2e6, 2e3, 6e3, "MF"},
+        {"Shortwave Broadcast", 3e6, 30e6, 3e3, 10e3, "MF"},
+        
+        // HF (3-30 MHz)
+        {"Amateur Radio 80m", 3.5e6, 4e6, 2e3, 6e3, "HF"},
+        {"Amateur Radio 40m", 7e6, 7.3e6, 2e3, 6e3, "HF"},
+        {"Amateur Radio 20m", 14e6, 14.35e6, 2e3, 6e3, "HF"},
+        {"Amateur Radio 15m", 21e6, 21.45e6, 2e3, 6e3, "HF"},
+        {"Amateur Radio 10m", 28e6, 29.7e6, 2e3, 6e3, "HF"},
+        {"CB Radio", 26.965e6, 27.405e6, 5e3, 15e3, "HF"},
+        {"Shortwave Broadcast", 3e6, 30e6, 3e3, 10e3, "HF"},
+        {"Maritime HF", 2e6, 26e6, 2e3, 6e3, "HF"},
+        {"Aviation HF", 3e6, 30e6, 2e3, 6e3, "HF"},
+        {"Military HF", 2e6, 30e6, 2e3, 12e3, "HF"},
+        {"Number Station", 3e6, 30e6, 2e3, 6e3, "HF"},
+        
+        // VHF (30-300 MHz)
+        {"FM Broadcast", 88e6, 108e6, 100e3, 200e3, "VHF"},
+        {"VHF TV", 54e6, 216e6, 6e6, 6e6, "VHF"},
+        {"Airband (VHF)", 118e6, 137e6, 8.33e3, 25e3, "VHF"},
+        {"Amateur Radio 6m", 50e6, 54e6, 2e3, 6e3, "VHF"},
+        {"Amateur Radio 2m", 144e6, 148e6, 5e3, 25e3, "VHF"},
+        {"Marine VHF", 156e6, 174e6, 12.5e3, 25e3, "VHF"},
+        {"Public Safety VHF", 136e6, 174e6, 12.5e3, 25e3, "VHF"},
+        {"Business Radio VHF", 150e6, 174e6, 12.5e3, 25e3, "VHF"},
+        {"Weather Radio", 162.4e6, 162.55e6, 5e3, 5e3, "VHF"},
+        {"NOAA Weather", 162.4e6, 162.55e6, 5e3, 5e3, "VHF"},
+        
+        // UHF (300-3000 MHz)
+        {"UHF TV", 470e6, 890e6, 6e6, 6e6, "UHF"},
+        {"Amateur Radio 70cm", 420e6, 450e6, 5e3, 25e3, "UHF"},
+        {"Amateur Radio 23cm", 1240e6, 1300e6, 5e3, 25e3, "UHF"},
+        {"GSM 850", 824e6, 849e6, 200e3, 200e3, "UHF"},
+        {"GSM 900", 890e6, 915e6, 200e3, 200e3, "UHF"},
+        {"GSM 1800", 1710e6, 1785e6, 200e3, 200e3, "UHF"},
+        {"GSM 1900", 1850e6, 1990e6, 200e3, 200e3, "UHF"},
+        {"3G UMTS 850", 824e6, 849e6, 5e6, 5e6, "UHF"},
+        {"3G UMTS 900", 880e6, 915e6, 5e6, 5e6, "UHF"},
+        {"3G UMTS 2100", 1920e6, 2170e6, 5e6, 5e6, "UHF"},
+        {"4G LTE 700", 700e6, 800e6, 1.4e6, 20e6, "UHF"},
+        {"4G LTE 850", 824e6, 849e6, 1.4e6, 20e6, "UHF"},
+        {"4G LTE 900", 880e6, 915e6, 1.4e6, 20e6, "UHF"},
+        {"4G LTE 1800", 1710e6, 1785e6, 1.4e6, 20e6, "UHF"},
+        {"4G LTE 2100", 1920e6, 2170e6, 1.4e6, 20e6, "UHF"},
+        {"4G LTE 2600", 2500e6, 2700e6, 1.4e6, 20e6, "UHF"},
+        {"5G NR Sub-6", 600e6, 6000e6, 5e6, 100e6, "UHF"},
+        {"WiFi 2.4 GHz", 2400e6, 2483.5e6, 20e6, 40e6, "UHF"},
+        {"WiFi 5 GHz", 5150e6, 5850e6, 20e6, 160e6, "UHF"},
+        {"Bluetooth Classic", 2400e6, 2483.5e6, 1e6, 3e6, "UHF"},
+        {"Bluetooth LE", 2400e6, 2483.5e6, 1e6, 2e6, "UHF"},
+        {"Zigbee", 2400e6, 2483.5e6, 2e6, 2e6, "UHF"},
+        {"GPS L1", 1575.42e6, 1575.42e6, 1e6, 2e6, "UHF"},
+        {"GPS L2", 1227.6e6, 1227.6e6, 1e6, 2e6, "UHF"},
+        {"GLONASS L1", 1602e6, 1602e6, 1e6, 2e6, "UHF"},
+        {"Galileo E1", 1575.42e6, 1575.42e6, 1e6, 4e6, "UHF"},
+        {"Satellite Phone", 1.5e9, 2.5e9, 5e3, 25e3, "UHF"},
+        {"Public Safety UHF", 450e6, 512e6, 12.5e3, 25e3, "UHF"},
+        {"Business Radio UHF", 450e6, 512e6, 12.5e3, 25e3, "UHF"},
+        {"FRS/GMRS", 462e6, 467e6, 12.5e3, 25e3, "UHF"},
+        {"PMR446", 446e6, 446.2e6, 12.5e3, 12.5e3, "UHF"},
+        {"Wireless Microphone", 470e6, 900e6, 100e3, 200e3, "UHF"},
+        {"RFID UHF", 860e6, 960e6, 200e3, 500e3, "UHF"},
+        {"LoRa", 433e6, 915e6, 125e3, 500e3, "UHF"},
+        {"Pager", 138e6, 470e6, 2e3, 8e3, "UHF"},
+        {"POCSAG", 138e6, 470e6, 2e3, 8e3, "UHF"},
+        {"APRS", 144.39e6, 144.39e6, 5e3, 20e3, "UHF"},
+        {"DMR", 400e6, 470e6, 12.5e3, 12.5e3, "UHF"},
+        {"D-Star", 144e6, 440e6, 5e3, 25e3, "UHF"},
+        {"System Fusion", 144e6, 440e6, 5e3, 25e3, "UHF"},
+        {"TETRA", 380e6, 430e6, 25e3, 25e3, "UHF"},
+        {"P25", 136e6, 960e6, 12.5e3, 12.5e3, "UHF"},
+        {"M17", 144e6, 440e6, 5e3, 25e3, "UHF"},
+        {"FreeDV", 7e6, 30e6, 1e3, 3e3, "UHF"},
+        {"WSPR", 1.8e6, 28e6, 6e3, 6e3, "UHF"},
+        {"FT8", 1.8e6, 50e6, 50, 50, "UHF"},
+        {"JS8Call", 1.8e6, 50e6, 50, 50, "UHF"},
+        {"Olivia", 1.8e6, 30e6, 500, 2e3, "UHF"},
+        {"RTTY", 1.8e6, 30e6, 170, 850, "UHF"},
+        {"PSK31", 1.8e6, 30e6, 31, 31, "UHF"},
+        {"JT65", 1.8e6, 50e6, 100, 200, "UHF"},
+        {"Packet Radio", 28e6, 1296e6, 5e3, 25e3, "UHF"},
+        {"EchoLink", 28e6, 1296e6, 5e3, 25e3, "UHF"},
+        {"IRLP", 28e6, 1296e6, 5e3, 25e3, "UHF"},
+        {"YSF", 144e6, 440e6, 5e3, 25e3, "UHF"},
+        {"NXDN", 144e6, 960e6, 12.5e3, 12.5e3, "UHF"},
+        {"P25 Phase 2", 136e6, 960e6, 12.5e3, 12.5e3, "UHF"},
+        {"ProVoice", 136e6, 960e6, 12.5e3, 12.5e3, "UHF"},
+        {"MPT-1327", 136e6, 960e6, 12.5e3, 25e3, "UHF"},
+        {"EDACS", 136e6, 960e6, 12.5e3, 25e3, "UHF"},
+        {"SmartNet", 136e6, 960e6, 12.5e3, 25e3, "UHF"},
+        {"SmartZone", 136e6, 960e6, 12.5e3, 25e3, "UHF"},
+        {"ASTRO 25", 136e6, 960e6, 12.5e3, 12.5e3, "UHF"},
+        {"iDEN", 800e6, 900e6, 25e3, 25e3, "UHF"},
+        {"Nextel", 800e6, 900e6, 25e3, 25e3, "UHF"},
+        {"CDMA", 800e6, 1900e6, 1.25e6, 1.25e6, "UHF"},
+        {"EV-DO", 800e6, 1900e6, 1.25e6, 1.25e6, "UHF"},
+        {"WiMAX", 2.3e9, 3.5e9, 5e6, 10e6, "UHF"},
+        {"LTE-M", 700e6, 2100e6, 1.4e6, 1.4e6, "UHF"},
+        {"NB-IoT", 700e6, 2100e6, 180e3, 180e3, "UHF"},
+        {"Sigfox", 868e6, 915e6, 100, 600, "UHF"},
+        {"LoRaWAN", 433e6, 915e6, 125e3, 500e3, "UHF"},
+        {"Z-Wave", 868e6, 915e6, 20e3, 100e3, "UHF"},
+        {"Thread", 2400e6, 2483.5e6, 2e6, 2e6, "UHF"},
+        {"Matter", 2400e6, 2483.5e6, 2e6, 2e6, "UHF"},
+        {"WirelessHART", 2400e6, 2483.5e6, 2e6, 2e6, "UHF"},
+        {"ISA100.11a", 2400e6, 2483.5e6, 2e6, 2e6, "UHF"},
+        {"EnOcean", 868e6, 315e6, 125e3, 125e3, "UHF"},
+        {"MiWi", 2400e6, 2483.5e6, 2e6, 2e6, "UHF"},
+        {"ANT+", 2400e6, 2483.5e6, 1e6, 1e6, "UHF"},
+        {"NFC", 13.56e6, 13.56e6, 100e3, 848e3, "UHF"},
+        {"RFID HF", 13.56e6, 13.56e6, 100e3, 848e3, "UHF"},
+        {"RFID LF", 125e3, 134e3, 1e3, 10e3, "UHF"},
+        {"Inductive Loop", 125e3, 134e3, 1e3, 10e3, "UHF"},
+        {"Wireless Charging", 100e3, 300e3, 10e3, 100e3, "UHF"},
+        {"Qi Wireless", 100e3, 300e3, 10e3, 100e3, "UHF"},
+        {"PMA Wireless", 275e3, 375e3, 10e3, 100e3, "UHF"},
+        {"A4WP", 6.78e6, 6.78e6, 100e3, 500e3, "UHF"},
+        {"AirFuel", 6.78e6, 6.78e6, 100e3, 500e3, "UHF"},
     };
-    for (int i = 0; i < 10 && a->analysis.match_count < 10; i++) {
+    
+    int num_signals = sizeof(signals) / sizeof(signals[0]);
+    
+    for (int i = 0; i < num_signals && a->analysis.match_count < 10; i++) {
         int confidence = 0;
-        if (center_freq >= signals[i].freq_min && center_freq <= signals[i].freq_max) confidence += 70;
-        if (bandwidth >= signals[i].bw_min && bandwidth <= signals[i].bw_max) confidence += 30;
+        
+        // Check frequency match
+        if (center_freq >= signals[i].freq_min && center_freq <= signals[i].freq_max) {
+            confidence += 60;
+            
+            // Bonus for exact frequency match (within 1%)
+            double freq_diff = fabs(center_freq - (signals[i].freq_min + signals[i].freq_max) / 2.0);
+            double center = (signals[i].freq_min + signals[i].freq_max) / 2.0;
+            if (freq_diff < center * 0.01) {
+                confidence += 20;
+            }
+        }
+        
+        // Check bandwidth match
+        if (bandwidth >= signals[i].bw_min && bandwidth <= signals[i].bw_max) {
+            confidence += 30;
+            
+            // Bonus for exact bandwidth match (within 10%)
+            double bw_diff = fabs(bandwidth - (signals[i].bw_min + signals[i].bw_max) / 2.0);
+            double bw_center = (signals[i].bw_min + signals[i].bw_max) / 2.0;
+            if (bw_diff < bw_center * 0.1) {
+                confidence += 10;
+            }
+        }
+        
+        // Only add if confidence is high enough
         if (confidence >= 50) {
-            strcpy(a->analysis.matches[a->analysis.match_count], signals[i].name);
-            a->analysis.match_confidence[a->analysis.match_count] = confidence;
-            a->analysis.match_count++;
+            // Check if we already have this signal
+            int already_added = 0;
+            for (int j = 0; j < a->analysis.match_count; j++) {
+                if (strcmp(a->analysis.matches[j], signals[i].name) == 0) {
+                    already_added = 1;
+                    break;
+                }
+            }
+            
+            if (!already_added) {
+                snprintf(a->analysis.matches[a->analysis.match_count], 128, "%s (%s)", 
+                        signals[i].name, signals[i].band);
+                a->analysis.match_confidence[a->analysis.match_count] = confidence;
+                a->analysis.match_count++;
+            }
+        }
+    }
+    
+    // Sort matches by confidence (highest first)
+    for (int i = 0; i < a->analysis.match_count - 1; i++) {
+        for (int j = i + 1; j < a->analysis.match_count; j++) {
+            if (a->analysis.match_confidence[j] > a->analysis.match_confidence[i]) {
+                // Swap confidence
+                int temp_conf = a->analysis.match_confidence[i];
+                a->analysis.match_confidence[i] = a->analysis.match_confidence[j];
+                a->analysis.match_confidence[j] = temp_conf;
+                
+                // Swap names
+                char temp_name[128];
+                strcpy(temp_name, a->analysis.matches[i]);
+                strcpy(a->analysis.matches[i], a->analysis.matches[j]);
+                strcpy(a->analysis.matches[j], temp_name);
+            }
         }
     }
 }
@@ -890,17 +1083,16 @@ static gboolean draw_waterfall(GtkWidget *widget, cairo_t *cr, gpointer user_dat
     cairo_paint(img_cr);
     
     // Calculate which frames to display based on zoom level (visible_seconds)
-    int start_frame = (int)(a->scroll_position * a->frames_per_second);
-    int end_frame = (int)((a->scroll_position + a->visible_seconds) * a->frames_per_second);
-    if (end_frame > a->total_frames) end_frame = a->total_frames;
-    
-    // Ensure we have enough frames for the visible time
     int frames_to_show = (int)(a->visible_seconds * a->frames_per_second);
-    if (end_frame - start_frame < frames_to_show) {
-        start_frame = a->total_frames - frames_to_show;
+    
+    int start_frame = (int)(a->scroll_position * a->frames_per_second);
+    int end_frame = start_frame + frames_to_show;
+    
+    // Ensure we're within bounds
+    if (end_frame > a->total_frames) {
+        end_frame = a->total_frames;
+        start_frame = end_frame - frames_to_show;
         if (start_frame < 0) start_frame = 0;
-        end_frame = start_frame + frames_to_show;
-        if (end_frame > a->total_frames) end_frame = a->total_frames;
     }
     
     CacheWindow *cw = find_cache_window(a, start_frame);
@@ -950,7 +1142,7 @@ static gboolean draw_waterfall(GtkWidget *widget, cairo_t *cr, gpointer user_dat
     
     int actual_frames = vis_end - vis_start;
     
-    // FIXED: Calculate frame height to fill the display
+    // FIXED: Use actual_frames for scaling to ensure waterfall displays
     double frame_height = (double)height / actual_frames;
     if (frame_height < 1.0) frame_height = 1.0;
     
@@ -959,7 +1151,7 @@ static gboolean draw_waterfall(GtkWidget *widget, cairo_t *cr, gpointer user_dat
         int frame_idx = vis_start + i;
         int cache_idx = frame_idx - cache_start;
         
-        // Calculate Y position (newest at top, oldest at bottom)
+        // FIXED: Use actual_frames for Y position
         int y_start = (int)((actual_frames - i - 1) * frame_height);
         int y_end = (int)((actual_frames - i) * frame_height);
         if (y_end <= y_start) y_end = y_start + 1;
