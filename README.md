@@ -1,3 +1,3 @@
-# Toxic Element 15 - A RF Signal Identification Tool
+# Toxic Element 15 - An RF Signal Identification Tool
 
 ![image](screenshot.png)
