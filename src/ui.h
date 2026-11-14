@@ -341,6 +341,9 @@ typedef struct Ui {
     char       *fc_report_markdown;
     char       *fc_report_html;
     int         fc_report_format;
+    int         fc_scope;            /* FclScope: per dataset or merged  */
+    GtkWidget  *fc_scope_radio_per;   /* Settings: analysis scope         */
+    GtkWidget  *fc_scope_radio_merged;
     void       *fc_job;              /* running FcJob (async analysis)  */
     GtkWidget *drawing;
     /* stationary-hover hint ("Shift+Click to select"): drawn inside the

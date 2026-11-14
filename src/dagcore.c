@@ -136,28 +136,52 @@ DagCoreRun *dagcore_execute(const DagCoreNodeSpec *specs, size_t n_specs,
             exec->on_node(ctx, i, run->count,
                           spec != NULL ? spec->title : NULL);
         }
-        /* dependency ordering: the prerequisite must have completed */
+        /* dependency ordering: every prerequisite (comma-separated list)
+         * must have completed */
         if (spec != NULL && spec->requires != NULL) {
-            size_t p = dagcore_find(run, spec->requires);
+            const char *p = spec->requires;
+            bool blocked = false;
 
-            if (p == (size_t)-1) {
-                char note[192];
+            while (*p != '\0' && !blocked) {
+                const char *end = strchr(p, ',');
+                size_t len = end != NULL ? (size_t)(end - p) : strlen(p);
+                char id[64];
+                size_t idx;
 
-                snprintf(note, sizeof(note),
-                         "prerequisite analysis '%s' is not in the registry",
-                         spec->requires);
-                dagcore_skip(run, i, note);
-                continue;
+                while (len > 0 && (*p == ' ' || *p == '\t')) {
+                    p++;
+                    len--;
+                }
+                while (len > 0 && (p[len - 1] == ' ' || p[len - 1] == '\t')) {
+                    len--;
+                }
+                if (len == 0) {
+                    p = end != NULL ? end + 1 : p + strlen(p);
+                    continue;
+                }
+                if (len >= sizeof(id)) len = sizeof(id) - 1;
+                memcpy(id, p, len);
+                id[len] = '\0';
+                idx = dagcore_find(run, id);
+                if (idx == (size_t)-1) {
+                    char note[192];
+
+                    snprintf(note, sizeof(note),
+                             "prerequisite analysis '%s' is not in the "
+                             "registry", id);
+                    dagcore_skip(run, i, note);
+                    blocked = true;
+                } else if (run->nodes[idx].status != DAGCORE_DONE) {
+                    char note[192];
+
+                    snprintf(note, sizeof(note),
+                             "prerequisite analysis '%s' did not run", id);
+                    dagcore_skip(run, i, note);
+                    blocked = true;
+                }
+                p = end != NULL ? end + 1 : p + strlen(p);
             }
-            if (run->nodes[p].status != DAGCORE_DONE) {
-                char note[192];
-
-                snprintf(note, sizeof(note),
-                         "prerequisite analysis '%s' did not run",
-                         spec->requires);
-                dagcore_skip(run, i, note);
-                continue;
-            }
+            if (blocked) continue;
         }
         if (exec != NULL && exec->skip_reason != NULL) {
             const char *why = exec->skip_reason(ctx, spec);

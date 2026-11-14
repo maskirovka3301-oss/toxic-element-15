@@ -15,6 +15,7 @@
 
 #include "dagcore.h"
 #include "fcdataset.h"
+#include "fclattice.h"
 
 typedef DagCoreRun FcRun;
 
@@ -25,7 +26,9 @@ extern const size_t          fc_node_count;
 /* Run the registry over a snapshot of the loaded datasets. Callable from a
  * worker thread (it only reads `list`). Returns NULL only on allocation
  * failure (err filled). */
-FcRun *fc_dag_run(const FcDatasetList *list, char *err, size_t err_len);
+/* `scope` selects per-dataset blocks or one merged measurement list. */
+FcRun *fc_dag_run(const FcDatasetList *list, FclScope scope, char *err,
+                  size_t err_len);
 void   fc_dag_free(FcRun *run);
 
 #endif /* TE15_FCDAG_H */

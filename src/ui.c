@@ -7288,6 +7288,7 @@ typedef enum {
  * thread (the engine only reads it) and the report is delivered back. */
 typedef struct {
     Ui            *ui;
+    FclScope       scope;
     FcDatasetList  snapshot;
     volatile int   cancelled;
     char          *text;
@@ -8043,7 +8044,7 @@ static gpointer fc_worker(gpointer data)
 {
     FcJob *job = (FcJob *)data;
     char err[256] = "";
-    FcRun *run = fc_dag_run(&job->snapshot, err, sizeof(err));
+    FcRun *run = fc_dag_run(&job->snapshot, job->scope, err, sizeof(err));
 
     if (run == NULL) {
         snprintf(job->err, sizeof(job->err), "%s",
@@ -8051,7 +8052,8 @@ static gpointer fc_worker(gpointer data)
     } else {
         job->nodes = run->count;
         job->elapsed_s = run->elapsed_s;
-        fc_report(&job->snapshot, run, &job->text, &job->markdown, &job->html);
+        fc_report(&job->snapshot, run, job->scope, &job->text,
+                  &job->markdown, &job->html);
         fc_dag_free(run);
     }
     g_idle_add(fc_deliver, job);
@@ -8072,6 +8074,7 @@ static void on_fc_analyze_clicked(GtkButton *button, gpointer user_data)
         return;
     }
     job->ui = ui;
+    job->scope = (FclScope)ui->fc_scope;
     if (!fcd_list_clone(&ui->fc_datasets, &job->snapshot)) {
         fcd_list_clear(&job->snapshot);
         free(job);
@@ -8085,9 +8088,10 @@ static void on_fc_analyze_clicked(GtkButton *button, gpointer user_data)
 
         snprintf(text, sizeof(text),
                  "Running the analysis DAG over %zu dataset%s (%zu "
-                 "measurements)…", ui->fc_datasets.count,
+                 "measurements), scope: %s…", ui->fc_datasets.count,
                  ui->fc_datasets.count == 1 ? "" : "s",
-                 fcd_list_count_measurements(&ui->fc_datasets));
+                 fcd_list_count_measurements(&ui->fc_datasets),
+                 fcl_scope_name((FclScope)ui->fc_scope));
         gtk_label_set_text(GTK_LABEL(ui->fc_status_label), text);
     }
     if (ui->fc_progress != NULL) gtk_widget_set_visible(ui->fc_progress, TRUE);
@@ -8282,6 +8286,83 @@ static GtkWidget *build_fc_left_panel(Ui *ui)
     return left;
 }
 
+/* ---- Settings: analysis scope ---------------------------------------- */
+
+static void on_fc_scope_toggled(GtkToggleButton *button, gpointer user_data)
+{
+    Ui *ui = (Ui *)user_data;
+
+    if (!gtk_toggle_button_get_active(button)) return;
+    ui->fc_scope = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(button),
+                                                     "fc-scope"));
+    if (ui->fc_status_label != NULL) {
+        char text[256];
+
+        snprintf(text, sizeof(text), "Analysis scope: %s.",
+                 fcl_scope_name((FclScope)ui->fc_scope));
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label), text);
+    }
+}
+
+static GtkWidget *build_fc_settings_page(Ui *ui)
+{
+    GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, PAGE_SPACING);
+    GtkWidget *frame = gtk_frame_new("Analysis scope");
+    GtkWidget *radio_per;
+    GtkWidget *radio_merged;
+    GtkWidget *grid;
+
+    gtk_widget_set_margin_start(page, PAGE_MARGIN * 2);
+    gtk_widget_set_margin_end(page, PAGE_MARGIN * 2);
+    gtk_widget_set_margin_top(page, PAGE_MARGIN * 2);
+    gtk_widget_set_margin_bottom(page, PAGE_MARGIN * 2);
+    grid = gtk_grid_new();
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 6);
+    gtk_widget_set_margin_start(grid, PAGE_MARGIN);
+    gtk_widget_set_margin_end(grid, PAGE_MARGIN);
+    gtk_widget_set_margin_top(grid, PAGE_MARGIN);
+    gtk_widget_set_margin_bottom(grid, PAGE_MARGIN);
+    radio_per = gtk_radio_button_new_with_label(
+        NULL, "Analyse every dataset separately");
+    radio_merged = gtk_radio_button_new_with_label_from_widget(
+        GTK_RADIO_BUTTON(radio_per),
+        "Merge all datasets into one measurement list");
+    g_object_set_data(G_OBJECT(radio_per), "fc-scope",
+                      GINT_TO_POINTER(FCL_SCOPE_PER_DATASET));
+    g_object_set_data(G_OBJECT(radio_merged), "fc-scope",
+                      GINT_TO_POINTER(FCL_SCOPE_MERGED));
+    g_signal_connect(radio_per, "toggled",
+                     G_CALLBACK(on_fc_scope_toggled), ui);
+    g_signal_connect(radio_merged, "toggled",
+                     G_CALLBACK(on_fc_scope_toggled), ui);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(radio_per),
+                                 ui->fc_scope == FCL_SCOPE_PER_DATASET);
+    gtk_grid_attach(GTK_GRID(grid), radio_per, 0, 0, 1, 1);
+    gtk_grid_attach(GTK_GRID(grid), radio_merged, 0, 1, 1, 1);
+    {
+        GtkWidget *hint = gtk_label_new(
+            "Per dataset: each session round (all subjects combined) and each "
+            "subject is analysed separately. Merged: all measurements of all "
+            "loaded datasets form one list and all analyses run once on that "
+            "list.");
+        GtkWidget *hint2 = gtk_label_new(
+            "The choice applies to the next Analyze run; the report states "
+            "which scope was used.");
+
+        gtk_label_set_xalign(GTK_LABEL(hint), 0.0);
+        gtk_label_set_line_wrap(GTK_LABEL(hint), TRUE);
+        gtk_label_set_xalign(GTK_LABEL(hint2), 0.0);
+        gtk_label_set_line_wrap(GTK_LABEL(hint2), TRUE);
+        gtk_grid_attach(GTK_GRID(grid), hint, 0, 2, 1, 1);
+        gtk_grid_attach(GTK_GRID(grid), hint2, 0, 3, 1, 1);
+    }
+    gtk_container_add(GTK_CONTAINER(frame), grid);
+    gtk_box_pack_start(GTK_BOX(page), frame, FALSE, FALSE, 0);
+    ui->fc_scope_radio_per = radio_per;
+    ui->fc_scope_radio_merged = radio_merged;
+    return page;
+}
+
 static GtkWidget *build_fc_analysis_page(Ui *ui)
 {
     GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, PAGE_SPACING);
@@ -8346,7 +8427,7 @@ static GtkWidget *build_freq_counter_page(Ui *ui)
     analysis_page = build_fc_analysis_page(ui);
     gtk_notebook_append_page(GTK_NOTEBOOK(right), analysis_page,
                              gtk_label_new("Analysis"));
-    settings_page = gtk_box_new(GTK_ORIENTATION_VERTICAL, PAGE_SPACING);
+    settings_page = build_fc_settings_page(ui);
     gtk_notebook_append_page(GTK_NOTEBOOK(right), settings_page,
                              gtk_label_new("Settings"));
     gtk_paned_pack1(GTK_PANED(paned), left, TRUE, FALSE);

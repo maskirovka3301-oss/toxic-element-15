@@ -160,6 +160,82 @@ static size_t block_count_for(const FcDatasetList *list)
     return n;
 }
 
+const char *fcl_scope_name(FclScope scope)
+{
+    return scope == FCL_SCOPE_MERGED ? "merged (all datasets in one list)"
+                                     : "per dataset (session rounds and "
+                                       "subjects)";
+}
+
+/* One block containing every measurement of every dataset. */
+static FclBlock *blocks_merged(const FcDatasetList *list, size_t *n_blocks_out)
+{
+    size_t total = fcd_list_count_measurements(list);
+    FclBlock *blocks;
+    double *values;
+    size_t k = 0;
+
+    if (n_blocks_out != NULL) *n_blocks_out = 0;
+    if (list == NULL || list->count == 0 || total == 0) return NULL;
+    blocks = calloc(2, sizeof(*blocks));
+    values = malloc(total * sizeof(*values));
+    if (blocks == NULL || values == NULL) {
+        free(blocks);
+        free(values);
+        return NULL;
+    }
+    for (size_t d = 0; d < list->count; d++) {
+        const FcDataset *ds = &list->items[d];
+
+        for (size_t s = 0; s < ds->n_sessions; s++) {
+            const FcSession *ss = &ds->sessions[s];
+
+            for (size_t r = 0; r < ss->n_rounds; r++) {
+                const FcRound *rr = &ss->rounds[r];
+
+                for (size_t j = 0; j < rr->n_subjects; j++) {
+                    const FcSubject *sj = &rr->subjects[j];
+
+                    memcpy(values + k, sj->measurements,
+                           sj->count * sizeof(*values));
+                    k += sj->count;
+                }
+            }
+        }
+        if (k < total && ds->n_unassigned > 0) {
+            memcpy(values + k, ds->unassigned,
+                   ds->n_unassigned * sizeof(*values));
+            k += ds->n_unassigned;
+        }
+    }
+    if (k == 0) {
+        free(blocks);
+        free(values);
+        return NULL;
+    }
+    snprintf(blocks[0].label, sizeof(blocks[0].label),
+             "merged: all %zu dataset(s)", list->count);
+    snprintf(blocks[0].dataset, sizeof(blocks[0].dataset), "%s", "merged");
+    blocks[0].values = values;
+    blocks[0].owns_values = true;
+    blocks[0].n = k;
+    blocks[0].min_hz = values[0];
+    blocks[0].max_hz = values[0];
+    for (size_t i = 1; i < k; i++) {
+        if (values[i] < blocks[0].min_hz) blocks[0].min_hz = values[i];
+        if (values[i] > blocks[0].max_hz) blocks[0].max_hz = values[i];
+    }
+    if (n_blocks_out != NULL) *n_blocks_out = 1;
+    return blocks;
+}
+
+FclBlock *fcl_blocks_build(const FcDatasetList *list, FclScope scope,
+                           size_t *n_blocks_out)
+{
+    if (scope == FCL_SCOPE_MERGED) return blocks_merged(list, n_blocks_out);
+    return fcl_blocks_from_datasets(list, n_blocks_out);
+}
+
 FclBlock *fcl_blocks_from_datasets(const FcDatasetList *list,
                                    size_t *n_blocks_out)
 {

@@ -897,18 +897,53 @@ static bool pucch_demod(const float complex *x, int n_slots, int slot_len,
         TE15_LOG(" %.2f", (double)cabsf(sym[0][k]));
     }
     TE15_LOG("\n");
-    /* base sequence group */
+    /* Base sequence group: search over the 30 sequences using the DMRS
+     * symbols only. Data symbols carry QPSK payloads, so their de-rotated
+     * DFT is not a single peak and would let wrong candidates win by
+     * chance (u detection was data-dependent before this change). */
     {
         double best = 0.0;
 
         for (int cand = 0; cand < 30; cand++) {
-            double m = 0.0;
+            /* PUCCH formats 1/1a/1b carry DMRS at symbols 2,3,4 of each
+             * slot; formats 2/2a/2b at 1 and 5. Try both pilot patterns and
+             * keep the better one: this makes the sequence-group search
+             * independent of the format guess (which is made later). */
+            static const int pat_a[] = { 1, 5 };
+            static const int pat_b[] = { 2, 3, 4 };
+            double score_a = 1e9, score_b = 1e9;
+            int na = 0, nb = 0;
 
-            for (int i = 0; i < n_used; i++) m += pucch_metric(sym[i], cand,
-                                                               NULL);
-            if (m > best) {
-                best = m;
-                u = cand;
+            for (int s = 0; s < n_slots; s++) {
+                for (int p = 0; p < 2; p++) {
+                    int idx = s * LTE_SYMBOLS_PER_SLOT + pat_a[p];
+
+                    if (idx < n_used) {
+                        double m = pucch_metric(sym[idx], cand, NULL);
+
+                        if (m < score_a) score_a = m;
+                        na++;
+                    }
+                }
+                for (int p = 0; p < 3; p++) {
+                    int idx = s * LTE_SYMBOLS_PER_SLOT + pat_b[p];
+
+                    if (idx < n_used) {
+                        double m = pucch_metric(sym[idx], cand, NULL);
+
+                        if (m < score_b) score_b = m;
+                        nb++;
+                    }
+                }
+            }
+            {
+                double score = (na > 0 ? score_a : -1.0);
+
+                if (nb > 0 && score_b > score) score = score_b;
+                if (score > best) {
+                    best = score;
+                    u = cand;
+                }
             }
         }
     }

@@ -34,7 +34,8 @@ typedef enum {
 typedef struct {
     const char *id;        /* unique identifier, e.g. "a0-baseline"       */
     const char *title;     /* human-readable name (reports/UI)            */
-    const char *requires;  /* prerequisite node id, or NULL               */
+    const char *requires;  /* prerequisite node id(s), comma separated,
+                            * or NULL when the node has no prerequisite    */
 } DagCoreNodeSpec;
 
 /* One node of a run: its registry entry, outcome and free-form note. */

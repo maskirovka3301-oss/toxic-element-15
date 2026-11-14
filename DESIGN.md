@@ -198,6 +198,34 @@ case):
 * **Summary**: the best spacing per block with a rose phase histogram and
   a lattice comb plot rendered into the report.
 
+### K-subcarrier averaging and spacing synthesis
+
+A second analysis chain tests whether the measurements are equal-weight
+averages of K latent subcarriers on the candidate grid (induced lattice
+df/K): an **induced-lattice scan** over K = 1..6 with permutation p-values
+(Bonferroni over K), a **phase-dispersion multiplicity** diagnostic, a
+**characteristic-function slope** estimate, a **grid-constrained Gaussian
+mixture fit** with EM and BIC/ICL model selection (the primary
+identifiability route), an **MDL/eigen-spectrum** node that is skipped with
+an explicit rationale (frequency lists carry no signal covariance), and a
+**K model-selection** table combining the methods with a confidence count.
+The **evidence screen** then discards analysis results that show little
+evidence (p >= 0.05, or DeltaBIC <= 2 for the mixture model) and keeps the
+significant ones, and the **synthesis** node aggregates the retained
+evidence per subcarrier spacing and per block, ranks the spacings
+(weighted -log10 p, family weights), reports the implied K and prints the
+overall ranking with the most likely subcarrier spacing. The DAG skips
+whole branches when their premise is absent: the K chain is skipped when
+no subcarrier clustering was found, the mixture fit when no
+induced-lattice clustering was detected, the CF slope when the K=1
+residual dispersion cannot serve as a single-subcarrier reference, and the
+MDL node always (no signal data).
+
+The Frequency Counter **Settings** tab configures the analysis scope:
+analyse every dataset separately (session rounds and subjects) or merge all
+loaded measurements into one list. The choice is applied to the next
+Analyze run and stated in the report header.
+
 Every test is deterministic (fixed RNG seed), reports effect sizes (R, V,
 theta, enrichment, cluster mass) as well as p-values, and the report
 renders the tables as text, Markdown and HTML.

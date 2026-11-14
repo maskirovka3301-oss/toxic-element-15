@@ -73,12 +73,24 @@ void      fcl_table_note(FclTable *t, const char *fmt, ...)
 
 /* ---- block construction --------------------------------------------- */
 
-/* Build blocks for all datasets: every round (all its subjects combined)
- * and every subject. The returned array is malloc'd; labels and value
- * pointers are borrowed from the datasets. */
+/* How the analyses treat multiple loaded datasets. */
+typedef enum {
+    FCL_SCOPE_PER_DATASET = 0,  /* blocks inside each dataset (default) */
+    FCL_SCOPE_MERGED            /* all measurements in one list         */
+} FclScope;
+
+/* Build the analysis blocks. Per-dataset scope: every session round (all
+ * its subjects combined) and every subject. Merged scope: one block with
+ * every measurement of every dataset. The returned array is calloc'd (with
+ * a zero terminator) and owns the combined copies; free with
+ * fcl_blocks_free(). */
+FclBlock *fcl_blocks_build(const FcDatasetList *list, FclScope scope,
+                           size_t *n_blocks_out);
 FclBlock *fcl_blocks_from_datasets(const FcDatasetList *list,
                                    size_t *n_blocks_out);
 void      fcl_blocks_free(FclBlock *blocks);
+/* Human-readable scope name for reports. */
+const char *fcl_scope_name(FclScope scope);
 
 /* Candidate spacings (Hz) and offsets (Hz): LTE/NR numerologies plus a
  * general set. */

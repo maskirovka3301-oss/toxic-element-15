@@ -367,7 +367,7 @@ static void render_analyses(Str *out, ListStyle style, const FcRun *run)
 }
 
 static void render_text(Str *out, const FcDatasetList *list,
-                        const FcRun *run)
+                        const FcRun *run, FclScope scope)
 {
     char stamp[64];
     time_t now = time(NULL);
@@ -382,10 +382,11 @@ static void render_text(Str *out, const FcDatasetList *list,
     str_add(out, "=================================\n");
     str_addf(out, "Generated: %s\n", stamp);
     str_addf(out, "Datasets: %zu | sessions: %zu | rounds: %zu | subjects: %zu "
-                  "| measurements: %zu\n\n",
+                  "| measurements: %zu\n",
              list != NULL ? list->count : 0, fcd_list_count_sessions(list),
              fcd_list_count_rounds(list), fcd_list_count_subjects(list),
              fcd_list_count_measurements(list));
+    str_addf(out, "Analysis scope: %s\n\n", fcl_scope_name(scope));
     str_add(out, "INPUT (schema: fc_dataset.json)\n---------------------------------\n");
     render_datasets(out, LIST_TEXT, list);
     str_add(out, "\nDAG\n---\n");
@@ -423,7 +424,7 @@ static void render_text(Str *out, const FcDatasetList *list,
 }
 
 static void render_markdown(Str *out, const FcDatasetList *list,
-                            const FcRun *run)
+                            const FcRun *run, FclScope scope)
 {
     char stamp[64];
     time_t now = time(NULL);
@@ -437,10 +438,11 @@ static void render_markdown(Str *out, const FcDatasetList *list,
     str_add(out, "# Frequency Counter Analysis Report\n\n");
     str_addf(out, "*Generated: %s*  \n", stamp);
     str_addf(out, "*Datasets: %zu, sessions: %zu, rounds: %zu, subjects: %zu, "
-                  "measurements: %zu*\n\n",
+                  "measurements: %zu*  \n",
              list != NULL ? list->count : 0, fcd_list_count_sessions(list),
              fcd_list_count_rounds(list), fcd_list_count_subjects(list),
              fcd_list_count_measurements(list));
+    str_addf(out, "*Analysis scope: %s*\n\n", fcl_scope_name(scope));
     str_add(out, "## Input (schema: fc_dataset.json)\n\n");
     render_datasets(out, LIST_MD, list);
     str_add(out, "\n## DAG\n\n");
@@ -461,7 +463,8 @@ static void render_markdown(Str *out, const FcDatasetList *list,
              run != NULL ? run->count : 0, fc_node_count);
 }
 
-static void render_html(Str *out, const FcDatasetList *list, const FcRun *run)
+static void render_html(Str *out, const FcDatasetList *list,
+                        const FcRun *run, FclScope scope)
 {
     char stamp[64];
     time_t now = time(NULL);
@@ -477,11 +480,12 @@ static void render_html(Str *out, const FcDatasetList *list, const FcRun *run)
                  "<body>\n<h1>Frequency Counter Analysis Report</h1>\n");
     str_addf(out, "<p><em>Generated: %s</em><br>\n", stamp);
     str_addf(out, "<em>Datasets: %zu, sessions: %zu, rounds: %zu, subjects: "
-                  "%zu, measurements: %zu</em></p>\n",
+                  "%zu, measurements: %zu</em><br><em>Analysis scope: ",
              list != NULL ? list->count : 0, fcd_list_count_sessions(list),
              fcd_list_count_rounds(list), fcd_list_count_subjects(list),
              fcd_list_count_measurements(list));
-    str_add(out, "<h2>Input (schema: fc_dataset.json)</h2>\n");
+    html_escape(out, fcl_scope_name(scope));
+    str_add(out, "</em></p>\n<h2>Input (schema: fc_dataset.json)</h2>\n");
     render_datasets(out, LIST_HTML, list);
     str_add(out, "<h2>DAG</h2>\n");
     if (fc_node_count == 0) {
@@ -502,7 +506,8 @@ static void render_html(Str *out, const FcDatasetList *list, const FcRun *run)
 }
 
 void fc_report(const FcDatasetList *list, const DagCoreRun *run,
-                   char **text_out, char **md_out, char **html_out)
+               FclScope scope, char **text_out, char **md_out,
+               char **html_out)
 {
     Str t;
     Str m;
@@ -511,9 +516,9 @@ void fc_report(const FcDatasetList *list, const DagCoreRun *run,
     memset(&t, 0, sizeof(t));
     memset(&m, 0, sizeof(m));
     memset(&h, 0, sizeof(h));
-    render_text(&t, list, run);
-    render_markdown(&m, list, run);
-    render_html(&h, list, run);
+    render_text(&t, list, run, scope);
+    render_markdown(&m, list, run, scope);
+    render_html(&h, list, run, scope);
     if (text_out != NULL) *text_out = str_take(&t);
     if (md_out != NULL) *md_out = str_take(&m);
     if (html_out != NULL) *html_out = str_take(&h);
