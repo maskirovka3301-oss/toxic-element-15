@@ -169,6 +169,39 @@ progress bar, Text/Markdown/HTML report selector, Save report and a
 read-only report view, mirroring the Selection tab) and an empty
 **Settings** page.
 
+### Subcarrier-lattice analyses
+
+The Frequency Counter analysis DAG (`fcdag.c`) runs a chain of tests over
+the loaded measurements: blocks are built per session round (all subjects
+combined) and per subject. The lattice tests use the candidate spacings
+5, 15, 30, 60, 120 and 240 kHz (LTE/NR numerologies plus the general 5 kHz
+case):
+
+* **Rayleigh** test on phases modulo df (unknown lattice offset) with the
+  asymptotic p and a permutation p (uniform frequencies inside the block).
+* **V test** directed at phase 0 (measurements on the assumed lattice),
+  permutation p; ignores clustering at other phases.
+* **Phase dispersion** (circular variance 1-R, small = clustering) with a
+  lower-tail permutation p.
+* **Periodogram scan** of df from 2 to 300 kHz in 1 kHz steps (top five
+  spacings per block; not corrected for the scan).
+* **Chi-square** test of lattice-centred bins (width 0.25 df, uniform
+  expectation; only cells with at least 5 expected counts).
+* **KDE enrichment** at the lattice points (Silverman bandwidth capped at
+  df/4) with a permutation p.
+* **Cluster-based permutation** test over 64 block bins (cyclic clusters,
+  uniform null).
+* **Silverman** critical-bandwidth bootstrap for multimodality
+  (Hartigan's dip is not implemented in this build).
+* **Multiple testing**: Benjamini-Hochberg and Bonferroni correction per
+  test family with the rejection counts.
+* **Summary**: the best spacing per block with a rose phase histogram and
+  a lattice comb plot rendered into the report.
+
+Every test is deterministic (fixed RNG seed), reports effect sizes (R, V,
+theta, enrichment, cluster mass) as well as p-values, and the report
+renders the tables as text, Markdown and HTML.
+
 Datasets are loaded and written with json-c against the JSON schema:
 required properties are enforced, unknown properties are rejected
 (`additionalProperties: false`), coordinates require both latitude and

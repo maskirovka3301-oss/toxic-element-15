@@ -52,6 +52,7 @@
 #include "fcdag.h"
 #include "fcreport.h"
 #include "fcdataset.h"
+#include "fclattice.h"
 #include "renderbuf.h"
 
 static int checks_run = 0;
@@ -4402,7 +4403,7 @@ static void test_dagcore(void)
     }
 
     /* the Spectrum and Frequency Counter registries share this engine */
-    CHECK(fc_node_count == 0);
+    CHECK(fc_node_count == 11);
     {
         FcDatasetList list;
         FcRun *fc_run;
@@ -4411,7 +4412,11 @@ static void test_dagcore(void)
         fc_run = fc_dag_run(&list, err, sizeof(err));
         CHECK(fc_run != NULL);
         if (fc_run != NULL) {
-            CHECK(fc_run->count == 0);
+            /* every node is recorded; with no data they are all skipped */
+            CHECK(fc_run->count == fc_node_count);
+            CHECK(fc_run->nodes[0].status == DAGCORE_SKIPPED);
+            CHECK(strstr(fc_run->nodes[0].note, "no measurement blocks") !=
+                  NULL);
             fc_dag_free(fc_run);
         }
         fcd_list_clear(&list);
@@ -4632,6 +4637,263 @@ static void test_fcdataset(void)
     remove(path);
 }
 
+/* ------------------------------------------------------------------ */
+/* Subcarrier-lattice statistics                                      */
+/* ------------------------------------------------------------------ */
+
+/* Build a dataset in memory: one session/round/subject whose measurements
+ * are `values` (the array is taken over). */
+static FcDataset *make_test_dataset(size_t n, const double *values)
+{
+    FcDataset *ds = calloc(1, sizeof(*ds));
+    FcSession *ss;
+    FcRound *rr;
+    FcSubject *sj;
+
+    if (ds == NULL) return NULL;
+    ds->dataset_id = strdup("test-ds");
+    ds->source_file = strdup("test");
+    ds->title = strdup("Test dataset");
+    ds->sessions = calloc(1, sizeof(*ds->sessions));
+    ds->n_sessions = 1;
+    ss = &ds->sessions[0];
+    snprintf(ss->session_id.text, sizeof(ss->session_id.text), "1");
+    ss->session_id.numeric = true;
+    ss->session_id.number = 1;
+    ss->rounds = calloc(1, sizeof(*ss->rounds));
+    ss->n_rounds = 1;
+    rr = &ss->rounds[0];
+    snprintf(rr->round_id.text, sizeof(rr->round_id.text), "1");
+    rr->subjects = calloc(1, sizeof(*rr->subjects));
+    rr->n_subjects = 1;
+    sj = &rr->subjects[0];
+    sj->name = strdup("grid");
+    sj->measurements = malloc(n * sizeof(*sj->measurements));
+    if (sj->measurements != NULL) {
+        memcpy(sj->measurements, values, n * sizeof(*values));
+        sj->count = sj->cap = n;
+    }
+    return ds;
+}
+
+static void free_test_dataset(FcDataset *ds)
+{
+    free(ds->dataset_id);
+    free(ds->source_file);
+    free(ds->title);
+    if (ds->sessions != NULL) {
+        FcSession *ss = &ds->sessions[0];
+
+        if (ss->rounds != NULL) {
+            FcRound *rr = &ss->rounds[0];
+
+            if (rr->subjects != NULL) {
+                free(rr->subjects[0].name);
+                free(rr->subjects[0].measurements);
+                free(rr->subjects);
+            }
+            free(ss->rounds);
+        }
+        free(ds->sessions);
+    }
+    free(ds->notes);
+    free(ds->unassigned);
+    free(ds);
+}
+
+static void test_fclattice(void)
+{
+    enum { N = 300 };
+    double *grid = malloc(N * sizeof(*grid));
+    double *uniform = malloc(N * sizeof(*uniform));
+    FclRng rng;
+    double R = 0.0, ang = 0.0, p;
+    size_t modes = 0;
+
+    puts("\n-- Subcarrier-lattice statistics --");
+    CHECK(grid != NULL && uniform != NULL);
+    if (grid == NULL || uniform == NULL) return;
+    fcl_rng_seed(&rng, 12345);
+    /* measurements on a 15 kHz lattice (with a 400 Hz offset so the mean
+     * phase is non-zero), plus small noise */
+    for (size_t i = 0; i < N; i++) {
+        double k = (double)(i % 20);
+
+        grid[i] = 2529000000.0 + k * 15000.0 + 400.0 +
+                  300.0 * fcl_rng_normal(&rng);
+        uniform[i] = 2529000000.0 + 300000.0 * fcl_rng_uniform(&rng);
+    }
+
+    /* folding and circular statistics */
+    CHECK(fabs(fcl_fold(2529015000.0, 0.0, 15000.0)) < 1e-12);
+    CHECK(fabs(fcl_fold(2529016500.0, 0.0, 15000.0) - 0.1) < 1e-9);
+    fcl_circular_stats(grid, N, 0.0, 15000.0, &ang, &R);
+    printf("  grid R=%.3f mean=%.1f deg\n", R, ang * 180.0 / M_PI);
+    CHECK(R > 0.9);
+    CHECK(fabs(ang * 180.0 / M_PI - 360.0 * 400.0 / 15000.0) < 15.0);
+    fcl_circular_stats(uniform, N, 0.0, 15000.0, &ang, &R);
+    printf("  uniform R=%.3f\n", R);
+    CHECK(R < 0.2);
+
+    /* Rayleigh and V tests (permutation, deterministic seed) */
+    p = fcl_perm_rayleigh(grid, N, 0.0, 15000.0, 2529000000.0,
+                          2529000000.0 + 300000.0, 200, &rng);
+    printf("  Rayleigh p(grid)=%.4g\n", p);
+    CHECK(p < 0.01);
+    p = fcl_perm_rayleigh(uniform, N, 0.0, 15000.0, 2529000000.0,
+                          2529000000.0 + 300000.0, 200, &rng);
+    printf("  Rayleigh p(uniform)=%.4g\n", p);
+    CHECK(p > 0.05);
+    p = fcl_perm_v(grid, N, 0.0, 15000.0, 2529000000.0,
+                   2529000000.0 + 300000.0, 0.0, 200, &rng);
+    printf("  V p(grid)=%.4g\n", p);
+    CHECK(p < 0.05);
+    /* PDM: small for the grid, near 1 for uniform */
+    {
+        double tg = fcl_pdm(grid, N, 0.0, 15000.0, 10);
+        double tu = fcl_pdm(uniform, N, 0.0, 15000.0, 10);
+
+        printf("  PDM grid=%.3f uniform=%.3f\n", tg, tu);
+        CHECK(tg < 0.3);
+        CHECK(tu > 0.5);
+    }
+
+    /* chi-square helper sanity: 3.841 with 1 df is the 5% point */
+    CHECK(fabs(fcl_chi2_p(3.841, 1) - 0.05) < 0.01);
+    CHECK(fcl_gamma_q(0.5, 0.0) == 1.0);
+
+    /* KDE enrichment: lattice points are denser than the block average */
+    {
+        double eg = fcl_kde_enrichment(grid, N, 0.0, 15000.0, 2529000000.0,
+                                       2529000000.0 + 300000.0);
+        double eu = fcl_kde_enrichment(uniform, N, 0.0, 15000.0, 2529000000.0,
+                                       2529000000.0 + 300000.0);
+
+        printf("  KDE enrichment grid=%.2f uniform=%.2f\n", eg, eu);
+        CHECK(eg > 1.5);
+        CHECK(eu > 0.5 && eu < 1.5);
+    }
+
+    /* cluster test: a dense cluster inside a wider block */
+    {
+        double *clustered = malloc(N * sizeof(*clustered));
+        double mass = 0.0, cp = 1.0;
+        size_t extent = 0;
+
+        CHECK(clustered != NULL);
+        if (clustered != NULL) {
+            for (size_t i = 0; i < N; i++) {
+                clustered[i] = 2529000000.0 +
+                               60000.0 * fcl_rng_uniform(&rng);
+            }
+            fcl_cluster_test(clustered, N, 2529000000.0,
+                             2529000000.0 + 300000.0, 64, 200, &rng, &mass,
+                             &extent, &cp);
+            printf("  cluster mass=%.1f extent=%zu p=%.4g\n", mass, extent,
+                   cp);
+            CHECK(cp < 0.05);
+            free(clustered);
+        }
+    }
+
+    /* Silverman: a two-mode sample rejects unimodality, a unimodal does not */
+    {
+        double *bimodal = malloc(N * sizeof(*bimodal));
+
+        if (bimodal != NULL) {
+            for (size_t i = 0; i < N; i++) {
+                bimodal[i] = (i % 2 == 0) ? 1000.0 : 5000.0;
+            }
+            {
+                double bp = fcl_silverman(bimodal, N, 1, 20, &rng, &modes);
+
+                printf("  Silverman bimodal p=%.3g modes=%zu\n", bp, modes);
+                CHECK(bp >= 0.0 && bp < 0.3);
+            }
+            free(bimodal);
+        }
+    }
+
+    /* multiple-testing correction */
+    {
+        double pv[4] = { 0.01, 0.04, 0.03, 0.005 };
+        size_t rej;
+
+        rej = fcl_bh_adjust(pv, 4, 0.05);
+        printf("  BH rejections=%zu p=%g,%g,%g,%g\n", rej, pv[0], pv[1], pv[2],
+               pv[3]);
+        CHECK(rej == 4);
+        CHECK(pv[0] <= pv[1]);
+        CHECK(fabs(fcl_bonferroni(0.01, 4) - 0.04) < 1e-12);
+    }
+
+    /* integration: the DAG runs the analyses on a grid-aligned dataset */
+    {
+        FcDatasetList list;
+        FcDataset *ds = make_test_dataset(N, grid);
+        FcRun *run;
+        char err[256] = "";
+        bool transferred = false;
+
+        CHECK(ds != NULL);
+        fcd_list_init(&list);
+        if (ds != NULL) {
+            list.items = malloc(sizeof(*list.items));
+            if (list.items != NULL) {
+                list.items[0] = *ds;
+                list.count = 1;
+                list.cap = 1;
+                transferred = true;
+            } else {
+                free_test_dataset(ds);
+                ds = NULL;
+            }
+        }
+        if (ds != NULL) {
+            size_t done = 0;
+
+            run = fc_dag_run(&list, err, sizeof(err));
+            CHECK(run != NULL);
+            if (run != NULL) {
+                char *text = NULL, *md = NULL, *html = NULL;
+
+                CHECK(run->count == fc_node_count);
+                for (size_t i = 0; i < run->count; i++) {
+                    if (run->nodes[i].status != DAGCORE_DONE) {
+                        printf("  node %s: %s (%s)\n",
+                               run->nodes[i].spec->id,
+                               dagcore_status_name(run->nodes[i].status),
+                               run->nodes[i].note);
+                    }
+                    CHECK(run->nodes[i].status == DAGCORE_DONE);
+                    CHECK(run->nodes[i].payload != NULL);
+                    done += run->nodes[i].status == DAGCORE_DONE ? 1 : 0;
+                }
+                printf("  DAG nodes done: %zu/%zu\n", done, run->count);
+                fc_report(&list, run, &text, &md, &html);
+                CHECK(text != NULL && strstr(text, "Rayleigh") != NULL);
+                CHECK(text != NULL && strstr(text, "subcarrier") != NULL);
+                CHECK(text != NULL && strstr(text, "ANALYSES") != NULL);
+                CHECK(text != NULL && strstr(text, "15.0") != NULL);
+                CHECK(md != NULL && strstr(md, "| Block |") != NULL);
+                CHECK(html != NULL && strstr(html, "<table") != NULL);
+                free(text);
+                free(md);
+                free(html);
+                fc_dag_free(run);
+            }
+        }
+        fcd_list_clear(&list);
+        if (ds != NULL) {
+            if (transferred) free(ds);
+            else free_test_dataset(ds);
+        }
+    }
+
+    free(grid);
+    free(uniform);
+}
+
 static void test_fcdag(void)
 {
     FcDatasetList list;
@@ -4641,11 +4903,12 @@ static void test_fcdag(void)
 
     puts("\n-- Frequency Counter analysis DAG --");
     fcd_list_init(&list);
-    CHECK(fc_node_count == 0);   /* no analyses are implemented yet */
+    CHECK(fc_node_count == 11);   /* the subcarrier-lattice test chain */
     run = fc_dag_run(&list, err, sizeof(err));
     CHECK(run != NULL);
     if (run != NULL) {
-        CHECK(run->count == 0);
+        CHECK(run->count == fc_node_count);
+        CHECK(run->nodes[0].status == DAGCORE_SKIPPED);
         fc_report(&list, run, &text, &md, &html);
         CHECK(text != NULL && md != NULL && html != NULL);
         if (text != NULL) {
@@ -4654,10 +4917,10 @@ static void test_fcdag(void)
                                      NULL,
                    strstr(text, "DAG") != NULL);
             CHECK(strstr(text, "FREQUENCY COUNTER ANALYSIS REPORT") != NULL);
-            CHECK(strstr(text, "Registry: 0 analyses defined") != NULL);
+            CHECK(strstr(text, "Registry: 11 analyses") != NULL);
             CHECK(strstr(text, "schema: fc_dataset.json") != NULL);
-            CHECK(strstr(text, "no analyses are defined") != NULL ||
-                  strstr(text, "not implemented yet") != NULL);
+            CHECK(strstr(text, "Rayleigh") != NULL ||
+                  strstr(text, "Measurement blocks") != NULL);
         }
         if (md != NULL) CHECK(strstr(md, "# Frequency Counter Analysis") != NULL);
         if (html != NULL) {
@@ -5188,6 +5451,7 @@ int main(void)
     test_streambuf();
     test_renderbuf();
     test_dagcore();
+    test_fclattice();
     test_fcdataset();
     test_fcdag();
     test_rank_canonical();

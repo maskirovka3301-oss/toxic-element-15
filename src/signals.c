@@ -15,6 +15,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <stddef.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -856,6 +857,26 @@ const SignalSpec *signal_spec_find(const char *name)
     return NULL;
 }
 
+/* Append to a bounded message buffer, saturating at the buffer end. */
+static size_t append_explained(char *buf, size_t len, size_t used,
+                               const char *fmt, ...)
+    __attribute__((format(printf, 4, 5)));
+
+static size_t append_explained(char *buf, size_t len, size_t used,
+                               const char *fmt, ...)
+{
+    va_list ap;
+    int n;
+
+    if (buf == NULL || len == 0 || used + 1 >= len) return len - 1;
+    va_start(ap, fmt);
+    n = vsnprintf(buf + used, len - used, fmt, ap);
+    va_end(ap);
+    if (n < 0) return used;
+    if ((size_t)n >= len - used) return len - 1;
+    return used + (size_t)n;
+}
+
 int signals_anomaly_check(double center_freq, double bandwidth,
                           const RankedMatch *ids, size_t n,
                           char *explain, size_t explain_len)
@@ -876,38 +897,43 @@ int signals_anomaly_check(double center_freq, double bandwidth,
     if (explain == NULL || explain_len == 0) return 1;
 
     size_t used = 0;
-    used += snprintf(explain, explain_len,
-                     "ANOMALY: no candidate conforms to its documented "
-                     "specification. Measured %.3f MHz, %.1f kHz. ",
-                     center_freq / 1e6, bandwidth / 1e3);
+
+    /* Append with proper truncation accounting: snprintf returns the length
+     * it *would* have written, so adding it blindly could run `used` past
+     * the buffer and make the remaining size underflow (a classic
+     * stack-smash pattern). */
+    used = append_explained(
+        explain, explain_len, used,
+        "ANOMALY: no candidate conforms to its documented "
+        "specification. Measured %.3f MHz, %.1f kHz. ",
+        center_freq / 1e6, bandwidth / 1e3);
     for (size_t i = 0; i < n && i < 3; i++) {
         const KnownSignal *sig = ids[i].signal;
-        used += snprintf(explain + used, explain_len - used,
-                         "%s%s: ", i ? "; " : "", sig->name);
-        if (used >= explain_len) break;
+
+        used = append_explained(explain, explain_len, used, "%s%s: ",
+                                i ? "; " : "", sig->name);
         if (!ids[i].in_band) {
             double outside = center_freq < sig->freq_min
                                  ? sig->freq_min - center_freq
                                  : center_freq - sig->freq_max;
-            used += snprintf(explain + used, explain_len - used,
-                             "%.4g MHz outside its %.4g-%.4g MHz allocation",
-                             outside / 1e6, sig->freq_min / 1e6,
-                             sig->freq_max / 1e6);
-            if (used >= explain_len) break;
+
+            used = append_explained(
+                explain, explain_len, used,
+                "%.4g MHz outside its %.4g-%.4g MHz allocation",
+                outside / 1e6, sig->freq_min / 1e6, sig->freq_max / 1e6);
         }
         if (ids[i].invalid_reason[0] != '\0') {
-            used += snprintf(explain + used, explain_len - used,
-                             "%s%s", ids[i].in_band ? "" : "; ",
-                             ids[i].invalid_reason);
-            if (used >= explain_len) break;
+            used = append_explained(explain, explain_len, used, "%s%s",
+                                    ids[i].in_band ? "" : "; ",
+                                    ids[i].invalid_reason);
         }
         if (ids[i].in_band && ids[i].invalid_reason[0] == '\0') {
-            used += snprintf(explain + used, explain_len - used,
-                             "documented bandwidth %.3g kHz",
-                             (signal_spec_find(sig->name) != NULL &&
-                              signal_spec_find(sig->name)->channel_bw > 0)
-                                 ? signal_spec_find(sig->name)->channel_bw / 1e3
-                                 : sig->bw_min / 1e3);
+            used = append_explained(
+                explain, explain_len, used, "documented bandwidth %.3g kHz",
+                (signal_spec_find(sig->name) != NULL &&
+                 signal_spec_find(sig->name)->channel_bw > 0)
+                    ? signal_spec_find(sig->name)->channel_bw / 1e3
+                    : sig->bw_min / 1e3);
         }
     }
     return 1;

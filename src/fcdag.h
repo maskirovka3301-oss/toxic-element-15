@@ -18,7 +18,7 @@
 
 typedef DagCoreRun FcRun;
 
-/* The analysis registry (currently empty: analyses to be defined later). */
+/* The analysis registry (the subcarrier-lattice test chain). */
 extern const DagCoreNodeSpec fc_node_specs[];
 extern const size_t          fc_node_count;
 

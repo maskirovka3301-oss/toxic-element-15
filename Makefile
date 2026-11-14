@@ -36,6 +36,7 @@ APP_SRC := \
 	src/streambuf.c \
 	src/renderbuf.c \
 	src/fcdataset.c \
+	src/fclattice.c \
 	src/dagcore.c \
 	src/dag.c \
 	src/fcdag.c \
@@ -84,6 +85,7 @@ TEST_SRC := \
 	src/streambuf.c \
 	src/renderbuf.c \
 	src/fcdataset.c \
+	src/fclattice.c \
 	src/dagcore.c \
 	src/fcdag.c \
 	src/fcreport.c \

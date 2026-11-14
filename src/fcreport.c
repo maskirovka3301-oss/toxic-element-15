@@ -1,6 +1,7 @@
 #include "fcreport.h"
 
 #include "fcdag.h"
+#include "fclattice.h"
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -230,6 +231,141 @@ static void render_datasets(Str *out, ListStyle style,
     list_end(out, style);
 }
 
+/* ---- analysis tables (DAG node payloads) ----------------------------- */
+
+static size_t utf8_truncate(const char *s, char *out, size_t out_len,
+                            size_t max_bytes)
+{
+    size_t n = strlen(s);
+
+    if (n <= max_bytes) {
+        snprintf(out, out_len, "%s", s);
+        return n;
+    }
+    /* cut on a UTF-8 boundary */
+    while (max_bytes > 0 && ((unsigned char)s[max_bytes] & 0xc0) == 0x80) {
+        max_bytes--;
+    }
+    snprintf(out, out_len, "%.*s…", (int)max_bytes, s);
+    return max_bytes;
+}
+
+static void render_text_table(Str *out, const FclTable *t)
+{
+    size_t widths[16] = { 0 };
+    const size_t max_cell = 52;
+
+    str_addf(out, "%s\n", t->title != NULL ? t->title : "(analysis)");
+    for (size_t i = 0; t->title != NULL && i < strlen(t->title) && i < 200; i++) {
+        str_add(out, "-");
+    }
+    str_add(out, "\n");
+    for (size_t col = 0; col < t->n_columns && col < 16; col++) {
+        char tmp[256];
+        size_t n = utf8_truncate(t->columns[col], tmp, sizeof(tmp), max_cell);
+
+        if (n > widths[col]) widths[col] = n;
+    }
+    for (size_t r = 0; r < t->n_rows; r++) {
+        for (size_t col = 0; col < t->n_columns && col < 16; col++) {
+            char tmp[256];
+            size_t n = utf8_truncate(t->cells[r][col], tmp, sizeof(tmp),
+                                     max_cell);
+
+            if (n > widths[col]) widths[col] = n;
+        }
+    }
+    for (size_t col = 0; col < t->n_columns && col < 16; col++) {
+        str_addf(out, "%-*s  ", (int)widths[col], t->columns[col]);
+    }
+    str_add(out, "\n");
+    for (size_t r = 0; r < t->n_rows; r++) {
+        for (size_t col = 0; col < t->n_columns && col < 16; col++) {
+            char tmp[256];
+
+            utf8_truncate(t->cells[r][col], tmp, sizeof(tmp), max_cell);
+            str_addf(out, "%-*s  ", (int)widths[col], tmp);
+        }
+        str_add(out, "\n");
+    }
+    if (t->notes != NULL && t->notes[0] != '\0') {
+        str_add(out, "\n");
+        str_add(out, t->notes);
+    }
+    str_add(out, "\n");
+}
+
+static void render_md_table(Str *out, const FclTable *t)
+{
+    str_addf(out, "### %s\n\n", t->title != NULL ? t->title : "(analysis)");
+    str_add(out, "| ");
+    for (size_t col = 0; col < t->n_columns; col++) {
+        str_add(out, t->columns[col]);
+        str_add(out, " | ");
+    }
+    str_add(out, "\n|");
+    for (size_t col = 0; col < t->n_columns; col++) str_add(out, " --- |");
+    str_add(out, "\n");
+    for (size_t r = 0; r < t->n_rows; r++) {
+        str_add(out, "| ");
+        for (size_t col = 0; col < t->n_columns; col++) {
+            str_add(out, t->cells[r][col]);
+            str_add(out, " | ");
+        }
+        str_add(out, "\n");
+    }
+    str_add(out, "\n");
+    if (t->notes != NULL && t->notes[0] != '\0') str_add(out, t->notes);
+    str_add(out, "\n");
+}
+
+static void render_html_table(Str *out, const FclTable *t)
+{
+    str_add(out, "<h3>");
+    html_escape(out, t->title != NULL ? t->title : "(analysis)");
+    str_add(out, "</h3>\n<table border=\"1\" cellpadding=\"3\">\n<tr>");
+    for (size_t col = 0; col < t->n_columns; col++) {
+        str_add(out, "<th>");
+        html_escape(out, t->columns[col]);
+        str_add(out, "</th>");
+    }
+    str_add(out, "</tr>\n");
+    for (size_t r = 0; r < t->n_rows; r++) {
+        str_add(out, "<tr>");
+        for (size_t col = 0; col < t->n_columns; col++) {
+            str_add(out, "<td>");
+            html_escape(out, t->cells[r][col]);
+            str_add(out, "</td>");
+        }
+        str_add(out, "</tr>\n");
+    }
+    str_add(out, "</table>\n");
+    if (t->notes != NULL && t->notes[0] != '\0') {
+        str_add(out, "<pre>");
+        html_escape(out, t->notes);
+        str_add(out, "</pre>\n");
+    }
+}
+
+/* Render the payload table of every executed analysis node. */
+static void render_analyses(Str *out, ListStyle style, const FcRun *run)
+{
+    if (run == NULL || run->count == 0) {
+        if (style == LIST_TEXT) str_add(out, "  (the DAG did not run)\n");
+        return;
+    }
+    for (size_t i = 0; i < run->count; i++) {
+        const DagCoreNode *node = &run->nodes[i];
+        const FclTable *t;
+
+        if (node->payload == NULL) continue;
+        t = (const FclTable *)node->payload;
+        if (style == LIST_TEXT) render_text_table(out, t);
+        else if (style == LIST_MD) render_md_table(out, t);
+        else render_html_table(out, t);
+    }
+}
+
 static void render_text(Str *out, const FcDatasetList *list,
                         const FcRun *run)
 {
@@ -274,11 +410,15 @@ static void render_text(Str *out, const FcDatasetList *list,
             }
         }
     }
+    str_add(out, "\nANALYSES\n--------\n");
+    render_analyses(out, LIST_TEXT, run);
     str_add(out, "\nRESULTS\n-------\n");
-    str_add(out, "  (no analysis produced any parameters yet)\n");
+    str_add(out, "  Each analysis table above lists its statistics and "
+                 "effect sizes; see the SUMMARY for the number of executed "
+                 "analyses.\n");
     str_add(out, "\nSUMMARY\n-------\n");
-    str_addf(out, "  Executed 0 of %zu analyses; every registry entry is "
-                  "pending an implementation.\n", fc_node_count);
+    str_addf(out, "  Executed %zu of %zu analyses.\n",
+             run != NULL ? run->count : 0, fc_node_count);
     if (run != NULL) str_addf(out, "  DAG elapsed: %.3f s\n", run->elapsed_s);
 }
 
@@ -312,10 +452,13 @@ static void render_markdown(Str *out, const FcDatasetList *list,
         str_addf(out, "Registry: %zu analyses, executed %zu\n\n",
                  fc_node_count, run != NULL ? run->count : 0);
     }
-    str_add(out, "## Results\n\n*No analysis produced any parameters yet.*\n\n");
+    str_add(out, "## Analyses\n\n");
+    render_analyses(out, LIST_MD, run);
+    str_add(out, "\n## Results\n\n*Each table above lists the statistics and "
+                 "effect sizes of one analysis.*\n\n");
     str_add(out, "## Summary\n\n");
-    str_addf(out, "Executed 0 of %zu analyses; every registry entry is "
-                  "pending an implementation.\n", fc_node_count);
+    str_addf(out, "Executed %zu of %zu analyses.\n",
+             run != NULL ? run->count : 0, fc_node_count);
 }
 
 static void render_html(Str *out, const FcDatasetList *list, const FcRun *run)
@@ -349,12 +492,13 @@ static void render_html(Str *out, const FcDatasetList *list, const FcRun *run)
         str_addf(out, "<p>Registry: %zu analyses, executed %zu</p>\n",
                  fc_node_count, run != NULL ? run->count : 0);
     }
-    str_add(out, "<h2>Results</h2>\n<p><em>No analysis produced any "
-                 "parameters yet.</em></p>\n");
+    str_add(out, "<h2>Analyses</h2>\n");
+    render_analyses(out, LIST_HTML, run);
+    str_add(out, "<h2>Results</h2>\n<p><em>Each table above lists the "
+                 "statistics and effect sizes of one analysis.</em></p>\n");
     str_add(out, "<h2>Summary</h2>\n");
-    str_addf(out, "<p>Executed 0 of %zu analyses; every registry entry is "
-                  "pending an implementation.</p>\n</body></html>\n",
-             fc_node_count);
+    str_addf(out, "<p>Executed %zu of %zu analyses.</p>\n</body></html>\n",
+             run != NULL ? run->count : 0, fc_node_count);
 }
 
 void fc_report(const FcDatasetList *list, const DagCoreRun *run,
