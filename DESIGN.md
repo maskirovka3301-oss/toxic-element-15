@@ -249,9 +249,12 @@ MDL node always (no signal data).
 The peak strip shows the mean spectrum of the waterfall pixel rows that
 are on screen, averaged over up to 128 evenly spaced rows fetched from the
 render buffer through the same row mapping the renderer uses (so its peaks
-match the visible data). It has a dB axis on its left: tick labels are calculated from
-the allowed dB range (the same -150..0 dB domain the sliders use, with a
-"nice" step of 5/10/20/25/50 dB). The areas of the plot outside the
+match the visible data). Its dB axis is data driven: it spans the full
+dynamic range of the displayed spectrum (the mean's own min..max at the
+current playback position, with a small margin), so the peaks fill the
+whole strip instead of being squashed against a fixed ceiling. The tick
+labels on the left are computed from that axis with a "nice" step. The
+areas of the plot outside the
 selected min..max dB window are shaded 50 % opaque blue over the finished
 plot (plot area only, so the axis labels stay readable). Unlike the
 waterfall colour scheme, the shading follows the sliders immediately while
@@ -274,10 +277,10 @@ The waterfall marks the current playback position with a red horizontal
 line (plus a small right-edge marker): the playhead is the stream's leading
 edge, advances with playback, stays where it is when the user scrolls or
 pauses, and is only drawn while it falls inside the visible time span. The
-peak strip mirrors the first row of waterfall pixels: `update_peak_spectrum()` fetches the top
-row through `wf_row_frame()`/`rb_row()` from the render buffer, so the strip
-and the top pixel row always show the same data (falling back to the cached
-mean spectrum only when the render buffer is not ready).
+peak strip is fed from the render buffer too: `update_peak_spectrum()`
+averages the visible rows through `wf_row_frame()`/`rb_row()`, so the strip
+always shows the data at the current playback position (falling back to the
+cached mean spectrum only when the render buffer is not ready).
 
 Transient notices shown in the bottom-right status label of the Spectrum
 toolbar (saved reports, selection warnings, buffer summaries, ...) expire

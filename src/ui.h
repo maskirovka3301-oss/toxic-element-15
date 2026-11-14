@@ -111,6 +111,7 @@ typedef struct Ui {
     GtkWidget *peak_pane;    /* drawing area: full-band PSD + green zoom rect */
     float     *peak_spectrum;/* FFT_SIZE mean dB over the visible window */
     bool       peak_valid;
+    double     peak_db_lo, peak_db_hi; /* data-driven dB axis of the strip */
     int        peak_handle;  /* 0 none, -1 left edge, +1 right edge,
                               * 2 middle (pan) while dragging          */
 

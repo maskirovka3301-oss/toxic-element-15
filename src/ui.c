@@ -576,6 +576,7 @@ static void lte_hint_apply(Ui *ui, const RankedMatch *ids, size_t n,
 static void update_sel_bw_label(Ui *ui);
 static void update_range_label(Ui *ui);
 static void update_peak_spectrum(Ui *ui);
+static void peak_axis_from_spectrum(Ui *ui);
 static void wf_len_init_widgets(Ui *ui);
 static bool map_region_pixels(Ui *ui, double fmin, double fmax,
                               double tmin, double tmax, int w, int h,
@@ -6232,6 +6233,44 @@ static void update_peak_spectrum_cached(Ui *ui)
         ui->peak_spectrum[b] *= inv;
     }
     ui->peak_valid = true;
+    peak_axis_from_spectrum(ui);
+}
+
+/* Set the peak strip's dB axis from an explicit data range: the axis spans
+ * the full dynamic range of the samples shown, with a small margin. */
+static void peak_set_axis(Ui *ui, double lo, double hi)
+{
+    double span = hi - lo;
+
+    if (!(span > 0.25)) {
+        double centre = 0.5 * (lo + hi);
+
+        lo = centre - 0.5;
+        hi = centre + 0.5;
+        span = 1.0;
+    }
+    {
+        double pad = span * 0.03;
+
+        if (pad < 0.5) pad = 0.5;
+        ui->peak_db_lo = lo - pad;
+        ui->peak_db_hi = hi + pad;
+    }
+}
+
+/* Derive the axis from the averaged spectrum (cached fallback path). */
+static void peak_axis_from_spectrum(Ui *ui)
+{
+    float min_v, max_v;
+
+    if (ui->peak_spectrum == NULL || peak_alloc_bins < 2) return;
+    min_v = ui->peak_spectrum[0];
+    max_v = ui->peak_spectrum[0];
+    for (int b = 1; b < peak_alloc_bins; b++) {
+        if (ui->peak_spectrum[b] < min_v) min_v = ui->peak_spectrum[b];
+        if (ui->peak_spectrum[b] > max_v) max_v = ui->peak_spectrum[b];
+    }
+    peak_set_axis(ui, (double)min_v, (double)max_v);
 }
 
 /* The peak strip shows the mean spectrum of the waterfall pixels that are
@@ -6292,6 +6331,9 @@ static void update_peak_spectrum(Ui *ui)
 
         for (int b = 0; b < fft_n; b++) ui->peak_spectrum[b] *= inv;
     }
+    /* the strip shows the full dynamic range of the displayed data: the
+     * axis spans the mean spectrum's own min..max (with a small margin) */
+    peak_axis_from_spectrum(ui);
     ui->peak_valid = true;
 }
 
@@ -6306,25 +6348,28 @@ static double peak_plot_w(int w)
     return (double)(w - PEAK_DB_AXIS_W);
 }
 
-static double peak_y_for_db(int h, double db)
+/* Map a dB value onto the peak strip's data-driven axis (lo..hi). */
+static double peak_y_for_db(int h, double db, double lo, double hi)
 {
-    double span = DB_SCALE_MAX - DB_SCALE_MIN;
+    double span = hi - lo;
 
-    if (db < DB_SCALE_MIN) db = DB_SCALE_MIN;
-    if (db > DB_SCALE_MAX) db = DB_SCALE_MAX;
-    return 1.0 + (DB_SCALE_MAX - db) / span * ((double)h - 2.0);
+    if (span < 1e-9) span = 1e-9;
+    if (db < lo) db = lo;
+    if (db > hi) db = hi;
+    return 1.0 + (hi - db) / span * ((double)h - 2.0);
 }
 
-/* A "nice" tick step for the allowed dB range (5..8 ticks). */
-static double peak_tick_step(void)
+/* A "nice" tick step for the axis span (about 4..8 ticks). */
+static double peak_tick_step(double lo, double hi)
 {
-    static const double steps[] = { 5.0, 10.0, 20.0, 25.0, 50.0 };
-    double span = DB_SCALE_MAX - DB_SCALE_MIN;
+    static const double steps[] = { 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 25.0, 50.0 };
+    double span = hi - lo;
 
+    if (span < 1e-9) span = 1e-9;
     for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
         if (span / steps[i] <= 8.0) return steps[i];
     }
-    return 50.0;
+    return 100.0;
 }
 
 static gboolean draw_peak_pane(GtkWidget *widget, cairo_t *cr, gpointer user_data)
@@ -6360,14 +6405,16 @@ static gboolean draw_peak_pane(GtkWidget *widget, cairo_t *cr, gpointer user_dat
                             ui->auto_scale ? ui->wf_range_hi : ui->db_max);
         double sel_hi = MAX(ui->auto_scale ? ui->wf_range_lo : ui->db_min,
                             ui->auto_scale ? ui->wf_range_hi : ui->db_max);
-        double step = peak_tick_step();
+        double axis_lo = ui->peak_db_lo;
+        double axis_hi = ui->peak_db_hi;
+        double step = peak_tick_step(axis_lo, axis_hi);
         double y_top, y_bot;
 
         if (pw <= 2.0) pw = 2.0;
-        if (sel_lo < DB_SCALE_MIN) sel_lo = DB_SCALE_MIN;
-        if (sel_hi > DB_SCALE_MAX) sel_hi = DB_SCALE_MAX;
-        y_top = peak_y_for_db(h, sel_hi);   /* top of the selected range */
-        y_bot = peak_y_for_db(h, sel_lo);   /* bottom of it              */
+        if (axis_hi - axis_lo < 0.5) axis_hi = axis_lo + 0.5;
+        if (pw <= 2.0) pw = 2.0;
+        y_top = peak_y_for_db(h, sel_hi, axis_lo, axis_hi);
+        y_bot = peak_y_for_db(h, sel_lo, axis_lo, axis_hi);
 
         /* the spectrum, mapped onto the allowed dB axis (values outside it
          * are clamped to the axis ends, like the colour scheme does) */
@@ -6377,7 +6424,8 @@ static gboolean draw_peak_pane(GtkWidget *widget, cairo_t *cr, gpointer user_dat
         for (int b = 0; b < peak_alloc_bins; b++) {
             double x = PEAK_DB_AXIS_W +
                        (double)b / (double)(peak_alloc_bins - 1) * pw;
-            double y = peak_y_for_db(h, ui->peak_spectrum[b]);
+            double y = peak_y_for_db(h, ui->peak_spectrum[b], axis_lo,
+                                     axis_hi);
 
             cairo_line_to(cr, x, y);
         }
@@ -6406,15 +6454,18 @@ static gboolean draw_peak_pane(GtkWidget *widget, cairo_t *cr, gpointer user_dat
         cairo_select_font_face(cr, FONT_FAMILY, CAIRO_FONT_SLANT_NORMAL,
                                CAIRO_FONT_WEIGHT_NORMAL);
         cairo_set_font_size(cr, 8.0);
-        for (double db = DB_SCALE_MIN; db <= DB_SCALE_MAX + 1e-9;
-             db += step) {
-            double y = peak_y_for_db(h, db);
+        {
+            double first = ceil(axis_lo / step) * step;
+
+        for (double db = first; db <= axis_hi + 1e-9; db += step) {
+            double y = peak_y_for_db(h, db, axis_lo, axis_hi);
             char label[24];
 
             cairo_move_to(cr, (double)PEAK_DB_AXIS_W - PEAK_DB_TICK_LEN, y);
             cairo_line_to(cr, (double)PEAK_DB_AXIS_W, y);
             cairo_stroke(cr);
-            snprintf(label, sizeof(label), "%.0f", db);
+            snprintf(label, sizeof(label), step >= 1.0 ? "%.0f" : "%.1f",
+                     db);
             {
                 cairo_text_extents_t ext;
 
@@ -6425,6 +6476,7 @@ static gboolean draw_peak_pane(GtkWidget *widget, cairo_t *cr, gpointer user_dat
                               y + ext.height / 2.0);
                 cairo_show_text(cr, label);
             }
+        }
         }
         cairo_set_source_rgb(cr, 0.35, 0.38, 0.35);
         cairo_move_to(cr, (double)PEAK_DB_AXIS_W + 0.5, 1.0);
@@ -6677,6 +6729,10 @@ void ui_init(Ui *ui, IqSource *src, WaterfallCache *cache)
     ui->cyclic_estimator = 0; /* FAM */
     ui->ss_estimator = 0;      /* Fluctuations */
     ui->last_progress = -1;
+    /* the peak strip's dB axis is data-driven; a sane default until the
+     * first spectrum arrives */
+    ui->peak_db_lo = -100.0;
+    ui->peak_db_hi = -20.0;
     ui->stream_buffer_fraction = 1.0 / 8.0;
     fcd_list_init(&ui->fc_datasets);
     for (size_t i = 0; i < FC_MAX_NODES; i++) ui->fc_node_enabled[i] = true;
@@ -9689,7 +9745,11 @@ void ui_reset_source(Ui *ui)
     }
     update_range_label(ui);
     update_peak_spectrum(ui);
-    ui->last_progress = -1; /* show the position text, not a stale % */
+    ui->last_progress = -1;
+    /* the peak strip's dB axis is data-driven; a sane default until the
+     * first spectrum arrives */
+    ui->peak_db_lo = -100.0;
+    ui->peak_db_hi = -20.0; /* show the position text, not a stale % */
     update_info_label(ui);
     gtk_widget_queue_draw(ui->drawing);
     gtk_widget_queue_draw(ui->peak_pane);
