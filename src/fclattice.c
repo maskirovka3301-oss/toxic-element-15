@@ -13,10 +13,63 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+/* 3GPP LTE / 5G NR numerologies, in priority order: the OFDM numerologies
+ * Delta f = 15 * 2^mu kHz (mu = 0..4) come first, followed by the special
+ * narrow spacings that 3GPP only defines for dedicated channels:
+ * 7.5 kHz for LTE eMBMS, 3.75 kHz for the NB-IoT single-tone uplink and
+ * 1.25 kHz for the long PRACH formats. 5 kHz is NOT a 3GPP numerology and
+ * is therefore not part of this grid (it only appears in the non-3GPP
+ * fallback grid below, which is evaluated only when no 3GPP numerology can
+ * explain the measurements). */
+const FclNumerologySpec fcl_numerologies[] = {
+    { 15000.0, FCL_NUM_NR, "NR/LTE 15 kHz" },
+    { 30000.0, FCL_NUM_NR, "NR 30 kHz" },
+    { 60000.0, FCL_NUM_NR, "NR 60 kHz" },
+    { 120000.0, FCL_NUM_NR, "NR 120 kHz" },
+    { 240000.0, FCL_NUM_NR, "NR 240 kHz" },
+    { 7500.0, FCL_NUM_LTE_EMBMS, "LTE eMBMS 7.5 kHz" },
+    { 3750.0, FCL_NUM_NB_IOT, "NB-IoT 3.75 kHz" },
+    { 1250.0, FCL_NUM_LTE_PRACH, "LTE/NR PRACH 1.25 kHz" }
+};
+const size_t fcl_n_numerologies =
+    sizeof(fcl_numerologies) / sizeof(fcl_numerologies[0]);
+
 const double fcl_spacings_hz[] = {
-    5000.0, 15000.0, 30000.0, 60000.0, 120000.0, 240000.0
+    15000.0, 30000.0, 60000.0, 120000.0, 240000.0, 7500.0, 3750.0, 1250.0
 };
 const size_t fcl_n_spacings = sizeof(fcl_spacings_hz) / sizeof(fcl_spacings_hz[0]);
+
+/* Non-3GPP fallback spacings (evaluated only when the 3GPP grid cannot
+ * explain the measurements). 5 kHz lives here: it is a plausible arbitrary
+ * engineering spacing, but it is not an LTE/NR numerology. */
+const double fcl_non3gpp_spacings_hz[] = {
+    5000.0, 10000.0, 17000.0, 20000.0, 25000.0, 33000.0, 40000.0, 50000.0,
+    80000.0, 100000.0, 200000.0
+};
+const size_t fcl_n_non3gpp_spacings =
+    sizeof(fcl_non3gpp_spacings_hz) / sizeof(fcl_non3gpp_spacings_hz[0]);
+
+const FclNumerologySpec *fcl_numerology_for(double df_hz, double tol_hz)
+{
+    for (size_t i = 0; i < fcl_n_numerologies; i++) {
+        if (fabs(df_hz - fcl_numerologies[i].df_hz) <= tol_hz) {
+            return &fcl_numerologies[i];
+        }
+    }
+    return NULL;
+}
+
+bool fcl_is_3gpp_spacing(double df_hz)
+{
+    return fcl_numerology_for(df_hz, 1.0) != NULL;
+}
+
+const char *fcl_numerology_name(double df_hz)
+{
+    const FclNumerologySpec *spec = fcl_numerology_for(df_hz, 1.0);
+
+    return spec != NULL ? spec->name : "non-3GPP spacing";
+}
 
 const double fcl_offsets_hz[] = { 0.0 };
 const size_t fcl_n_offsets = sizeof(fcl_offsets_hz) / sizeof(fcl_offsets_hz[0]);

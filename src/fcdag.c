@@ -79,10 +79,14 @@ typedef struct {
         double p;
         double weight;
         bool   retained;
+        bool   is_3gpp;   /* spacing is an LTE/NR numerology */
     } *evidence;
     size_t      n_evidence;
     size_t      cap_evidence;
     bool        have_evidence;
+    bool        non3gpp_used;   /* the non-3GPP fallback scan ran */
+    bool        any_primary_clustering; /* a 15..240 kHz NR/LTE numerology
+                                         * showed significant clustering */
 } FcCtx;
 
 /* The values every analysis uses: drift-corrected when the drift node
@@ -143,6 +147,7 @@ static void ctx_add_evidence(FcCtx *c, const char *family, size_t block,
     c->evidence[c->n_evidence].K = K;
     c->evidence[c->n_evidence].effect = effect;
     c->evidence[c->n_evidence].p = p;
+    c->evidence[c->n_evidence].is_3gpp = fcl_is_3gpp_spacing(spacing_hz);
     c->n_evidence++;
 }
 
@@ -151,6 +156,7 @@ const DagCoreNodeSpec fc_node_specs[] = {
     { "blocks", "Measurement blocks", NULL },
     { "drift-correction", "Device warm-up drift estimation and correction",
       "blocks" },
+    { "numerology-screen", "3GPP LTE/NR numerology screen", "blocks" },
     { "rayleigh", "Rayleigh circular-uniformity test", "blocks" },
     { "vtest", "V test for the lattice direction", "rayleigh" },
     { "pdm", "Phase dispersion minimisation", "vtest" },
@@ -162,6 +168,7 @@ const DagCoreNodeSpec fc_node_specs[] = {
     { "correction", "Multiple-testing correction (BH/Bonferroni)",
       "multimodal" },
     { "summary", "Per-block subcarrier-lattice summary", "correction" },
+    { "non3gpp-fallback", "Non-3GPP spacing fallback scan", "summary" },
     { "induced-scan", "Induced-lattice scan over K subcarriers",
       "rayleigh,correction" },
     { "k-dispersion", "Phase-dispersion multiplicity diagnostic",
@@ -193,11 +200,12 @@ const size_t fc_node_count = sizeof(fc_node_specs) / sizeof(fc_node_specs[0]);
  * deliberate exception: it is always skipped because frequency lists carry
  * no signal covariance). Kept in registry order. */
 static const char *const fc_exec_ids[] = {
-    "blocks", "drift-correction", "rayleigh", "vtest", "pdm",
+    "blocks", "drift-correction", "numerology-screen", "rayleigh", "vtest",
+    "pdm",
     "periodogram", "chisq", "kde", "cluster", "multimodal", "correction",
     "summary", "induced-scan", "k-dispersion", "cf-slope", "mixture-fit",
     "model-select", "k-summary", "evidence-filter", "synthesis",
-    "hypothesis", "subcarrier-map"
+    "hypothesis", "subcarrier-map", "non3gpp-fallback"
 };
 
 static bool fc_has_executor(const char *id)
@@ -554,7 +562,15 @@ static FclTable *analysis_rayleigh(FcCtx *c)
                 ctx_add_test(c, "rayleigh", label, p_perm);
                 ctx_add_evidence(c, "rayleigh", b, df, 1, R, p_perm);
                 ctx_note_best(c, b, df, p_perm);
-                if (p_perm < 0.01) c->any_clustering = true;
+                if (p_perm < 0.01) {
+                    const FclNumerologySpec *ns =
+                        fcl_numerology_for(df, 1.0);
+
+                    c->any_clustering = true;
+                    if (ns != NULL && ns->family == FCL_NUM_NR) {
+                        c->any_primary_clustering = true;
+                    }
+                }
             }
         }
     }
@@ -1551,9 +1567,10 @@ static FclTable *analysis_synthesis(FcCtx *c)
 {
     static const char *cols[] = { "Block", "rank", "spacing (kHz)",
                                   "evidence score", "supporting analyses",
-                                  "implied K", "interpretation" };
+                                  "implied K", "numerology",
+                                  "interpretation" };
     FclTable *t = fcl_table_new(
-        "Synthesis: most likely subcarrier spacings", cols, 7);
+        "Synthesis: most likely subcarrier spacings", cols, 8);
     static const char *const families[] = {
         "rayleigh", "vtest", "pdm", "chisq", "kde", "induced-K",
         "mixture-BIC"
@@ -1628,7 +1645,7 @@ static FclTable *analysis_synthesis(FcCtx *c)
             }
         }
         for (size_t s = 0; s < n_sp; s++) {
-            char cells[7][128];
+            char cells[8][128];
             int k_implied = 1;
             char fams[128] = "";
 
@@ -1654,12 +1671,14 @@ static FclTable *analysis_synthesis(FcCtx *c)
             snprintf(cells[4], sizeof(cells[4]), "%zu (%s)", support[s], fams);
             snprintf(cells[5], sizeof(cells[5]), "%d", k_implied);
             snprintf(cells[6], sizeof(cells[6]), "%s",
+                     fcl_numerology_name(spacings[s]));
+            snprintf(cells[7], sizeof(cells[7]), "%s",
                      s == 0 && support[s] > 0
                          ? (support[s] >= 3 ? "most likely (strong)"
                                             : "most likely (moderate)")
                          : support[s] > 0 ? "supported"
                                           : "weak");
-            fc_add_cells(t, cells, 7);
+            fc_add_cells(t, cells, 8);
         }
     }
     /* overall ranking across blocks */
@@ -2165,23 +2184,47 @@ static FclTable *analysis_hypothesis(FcCtx *c)
 
     consistent = total_families >= 2 && m >= 1;
     enough_data = total_n >= 12;
+    {
+    const FclNumerologySpec *top_spec = fcl_numerology_for(top_spacing, 1.0);
+    const bool top_3gpp = top_spec != NULL;
+    const bool top_nr = top_spec != NULL && top_spec->family == FCL_NUM_NR;
+    const char *top_family = fcl_numerology_name(top_spacing);
+
     if (p_comb < FC_ALPHA && consistent && enough_data) {
-        if (top_K > 1) {
+        if (top_3gpp && !top_nr) {
             snprintf(verdict, sizeof(verdict),
-                     "The data support one or more subcarriers with a "
-                     "spacing of %.3g kHz: the measurements are consistent "
-                     "with equal-weight averages of K = %d latent "
-                     "subcarriers on that lattice (combined p = %.3g < "
-                     "alpha %.2f; %zu test families; %zu measurements).",
+                     "No LTE/NR broadband numerology explains the data; the "
+                     "measurements are consistent only with the 3GPP "
+                     "special-channel grid %s (%.3g kHz%s), which is defined "
+                     "for dedicated channels (eMBMS/NB-IoT/PRACH), not for "
+                     "broadband subcarrier data (combined p = %.3g < alpha "
+                     "%.2f).", top_family, top_spacing / 1e3,
+                     top_K > 1 ? ", multiple subcarriers" : "", p_comb,
+                     FC_ALPHA);
+        } else if (!top_3gpp) {
+            snprintf(verdict, sizeof(verdict),
+                     "No 3GPP LTE/NR numerology explains the data: the only "
+                     "supported explanation is the non-3GPP fallback spacing "
+                     "of %.3g kHz%s (combined p = %.3g < alpha %.2f; %zu "
+                     "measurements).", top_spacing / 1e3,
+                     top_K > 1 ? " (multiple subcarriers)" : "", p_comb,
+                     FC_ALPHA, total_n);
+        } else if (top_K > 1) {
+            snprintf(verdict, sizeof(verdict),
+                     "The data are consistent with 4G-LTE/5G-NR numerology "
+                     "%s (%.3g kHz subcarrier spacing): equal-weight "
+                     "averages of K = %d latent subcarriers on that lattice "
+                     "fit (combined p = %.3g < alpha %.2f; %zu test "
+                     "families; %zu measurements).", top_family,
                      top_spacing / 1e3, top_K, p_comb, FC_ALPHA,
                      total_families, total_n);
         } else {
             snprintf(verdict, sizeof(verdict),
-                     "The data support a subcarrier lattice with a "
-                     "spacing of %.3g kHz (single subcarrier, K = 1): "
+                     "The data are consistent with 4G-LTE/5G-NR numerology "
+                     "%s (%.3g kHz subcarrier spacing, single subcarrier): "
                      "combined p = %.3g < alpha %.2f; %zu test families; "
-                     "%zu measurements.", top_spacing / 1e3, p_comb,
-                     FC_ALPHA, total_families, total_n);
+                     "%zu measurements.", top_family, top_spacing / 1e3,
+                     p_comb, FC_ALPHA, total_families, total_n);
         }
     } else if (!enough_data) {
         snprintf(verdict, sizeof(verdict),
@@ -2199,6 +2242,10 @@ static FclTable *analysis_hypothesis(FcCtx *c)
                  "Cannot conclude: the spacing evidence is not consistent "
                  "across independent test families (combined p = %.3g, "
                  "alpha %.2f).", p_comb, FC_ALPHA);
+    }
+    fcl_table_note(t, "Numerology family of the best-supported spacing: %s "
+                      "(3GPP LTE/NR compatible: %s).", top_family,
+                   top_3gpp ? "yes" : "no: fallback spacing only");
     }
     fcl_table_note(t, "Alpha: %.2f; per-block p-values use the "
                       "Westfall-Young max statistic over all candidate "
@@ -2478,10 +2525,10 @@ static FclTable *analysis_subcarrier_map(FcCtx *c)
 {
     static const char *cols[] = { "Dataset", "Session", "Round", "n",
                                   "spacing (kHz)", "K", "used subcarriers",
-                                  "phase offsets (kHz)", "counts",
-                                  "R", "verdict" };
+                                  "phase offsets (kHz)", "counts", "R",
+                                  "numerology", "verdict" };
     FclTable *t = fcl_table_new("Reconstructed subcarriers per round", cols,
-                                11);
+                                12);
     size_t rounds = 0, multi = 0, clear = 0;
     double evidence_df = 0.0;
 
@@ -2515,6 +2562,7 @@ static FclTable *analysis_subcarrier_map(FcCtx *c)
         double best_bic = INFINITY;
         SubcarrierMap best;
         bool found = false;
+        bool used_fallback = false;
 
         if (values == NULL || n < 6) continue;
         if (!parse_round_label(c->blocks[b].label, dataset, sizeof(dataset),
@@ -2537,60 +2585,77 @@ static FclTable *analysis_subcarrier_map(FcCtx *c)
         }
         memset(&best, 0, sizeof(best));
         {
-            double cands[16];
+            double cands[32];
             size_t n_cand = 0;
+            int pass;
 
-            for (size_t s = 0; s < fcl_n_spacings && n_cand < 16; s++) {
-                cands[n_cand++] = fcl_spacings_hz[s];
-            }
-            for (size_t i = 0; i < c->n_evidence && n_cand < 16; i++) {
-                bool seen = false;
+            /* Pass 0 tests the 3GPP numerologies (plus any retained 3GPP
+             * evidence spacing); only when nothing fits there, pass 1 adds
+             * the non-3GPP fallback grid (which includes 5 kHz). */
+            for (pass = 0; pass < 2 && !found; pass++) {
+                n_cand = 0;
+                if (pass == 0) {
+                    for (size_t s = 0;
+                         s < fcl_n_spacings && n_cand < 32; s++) {
+                        cands[n_cand++] = fcl_spacings_hz[s];
+                    }
+                } else {
+                    for (size_t s = 0;
+                         s < fcl_n_non3gpp_spacings && n_cand < 32; s++) {
+                        cands[n_cand++] = fcl_non3gpp_spacings_hz[s];
+                    }
+                }
+                for (size_t i = 0; i < c->n_evidence && n_cand < 32; i++) {
+                    bool seen = false;
 
-                if (!c->evidence[i].retained) continue;
+                    if (!c->evidence[i].retained) continue;
+                    if ((pass == 0) != c->evidence[i].is_3gpp) continue;
+                    for (size_t s = 0; s < n_cand; s++) {
+                        if (fabs(cands[s] - c->evidence[i].spacing_hz) <
+                            1.0) {
+                            seen = true;
+                        }
+                    }
+                    if (!seen) cands[n_cand++] = c->evidence[i].spacing_hz;
+                }
+                if (evidence_df > 0.0 &&
+                    ((pass == 0) == fcl_is_3gpp_spacing(evidence_df))) {
+                    bool seen = false;
+
+                    for (size_t s = 0; s < n_cand; s++) {
+                        if (fabs(cands[s] - evidence_df) < 1.0) seen = true;
+                    }
+                    if (!seen && n_cand < 32) cands[n_cand++] = evidence_df;
+                }
                 for (size_t s = 0; s < n_cand; s++) {
-                    if (fabs(cands[s] - c->evidence[i].spacing_hz) < 1.0) {
-                        seen = true;
+                    double phases[2048];
+                    double df = cands[s];
+                    size_t m = n < 2048 ? n : 2048;
+
+                    /* at least 1.5 lattice cycles must fit in the span */
+                    if (df <= 0.0 || span < 1.5 * df) continue;
+                    for (size_t i = 0; i < m; i++) {
+                        phases[i] = fcl_fold(values[i], 0.0, df);
+                    }
+                    for (int K = 1; K <= FCLK_MAX; K++) {
+                        SubcarrierMap fit;
+
+                        if (!fit_subcarrier_phases(phases, m, K, df,
+                                                   &fit)) {
+                            continue;
+                        }
+                        if (!found || fit.bic < best_bic) {
+                            best_bic = fit.bic;
+                            best = fit;
+                            found = true;
+                        }
                     }
                 }
-                if (!seen) cands[n_cand++] = c->evidence[i].spacing_hz;
-            }
-            if (evidence_df > 0.0) {
-                bool seen = false;
-
-                for (size_t s = 0; s < n_cand; s++) {
-                    if (fabs(cands[s] - evidence_df) < 1.0) seen = true;
-                }
-                if (!seen && n_cand < 16) cands[n_cand++] = evidence_df;
-            }
-            for (size_t s = 0; s < n_cand; s++) {
-                double phases[2048];
-                double df = cands[s];
-                size_t m = n < 2048 ? n : 2048;
-
-                /* at least 1.5 lattice cycles must fit in the span */
-                if (df <= 0.0 || span < 1.5 * df) continue;
-                for (size_t i = 0; i < m; i++) {
-                    phases[i] = fcl_fold(values[i], 0.0, df);
-                }
-                for (int K = 1; K <= FCLK_MAX; K++) {
-                    SubcarrierMap fit;
-
-                    if (!fit_subcarrier_phases(phases, m, K, df, &fit)) {
-                        continue;
-                    }
-                    /* prefer more components only if BIC improves; add a
-                     * small penalty so ties keep the simpler model */
-                    if (!found || fit.bic < best_bic) {
-                        best_bic = fit.bic;
-                        best = fit;
-                        found = true;
-                    }
-                }
+                if (found && pass == 1) used_fallback = true;
             }
         }
         if (!found) {
-            char cells[11][128];
-
+            char cells[12][128];
 
             snprintf(cells[0], sizeof(cells[0]), "%s", dataset);
             snprintf(cells[1], sizeof(cells[1]), "%s", session);
@@ -2602,14 +2667,15 @@ static FclTable *analysis_subcarrier_map(FcCtx *c)
             snprintf(cells[7], sizeof(cells[7]), "-");
             snprintf(cells[8], sizeof(cells[8]), "-");
             snprintf(cells[9], sizeof(cells[9]), "-");
-            snprintf(cells[10], sizeof(cells[10]),
+            snprintf(cells[10], sizeof(cells[10]), "-");
+            snprintf(cells[11], sizeof(cells[11]),
                      "cannot reconstruct (span too narrow)");
-            fc_add_cells(t, cells, 11);
+            fc_add_cells(t, cells, 12);
             rounds++;
             continue;
         }
         {
-            char cells[11][128];
+            char cells[12][128];
             char used[128] = "";
             char offsets[128] = "";
             char counts[128] = "";
@@ -2655,11 +2721,14 @@ static FclTable *analysis_subcarrier_map(FcCtx *c)
             snprintf(cells[8], sizeof(cells[8]), "%s", counts);
             snprintf(cells[9], sizeof(cells[9]), "%.3f", best.R);
             snprintf(cells[10], sizeof(cells[10]), "%s",
+                     fcl_numerology_name(best.spacing_hz));
+            snprintf(cells[11], sizeof(cells[11]), "%s%s",
+                     used_fallback ? "non-3GPP fallback: " : "",
                      best.K > 1 && sep_hz > 2.0 * sigma_hz
                          ? "clear multi-subcarrier structure"
                          : best.K > 1 ? "multiple subcarriers (overlapping)"
                                       : "single subcarrier per spacing");
-            fc_add_cells(t, cells, 11);
+            fc_add_cells(t, cells, 12);
             rounds++;
         }
     }
@@ -2678,6 +2747,210 @@ static FclTable *analysis_subcarrier_map(FcCtx *c)
                       "is not identifiable from frequencies alone. 'counts' "
                       "is the number of measurements assigned to each "
                       "subcarrier index.");
+    return t;
+}
+
+/* ------------------------------------------------------------------ */
+/* node: numerology-screen (3GPP LTE/NR candidates first)             */
+/* ------------------------------------------------------------------ */
+
+/* Screen the candidate grid: for every block the best-fitting 3GPP
+ * numerology (Rayleigh statistic on the folded phases) and its family. The
+ * report makes the "3GPP first" policy explicit: only the LTE/NR
+ * numerologies are candidates here, and 5 kHz is not one of them. */
+static FclTable *analysis_numerology_screen(FcCtx *c)
+{
+    static const char *cols[] = { "Block", "n", "span (kHz)",
+                                  "best 3GPP spacing (kHz)", "numerology",
+                                  "R", "p (asymptotic)", "cycles" };
+    FclTable *t = fcl_table_new("3GPP LTE/NR numerology screen", cols, 8);
+    size_t rows = 0;
+
+    if (t == NULL) return NULL;
+    fcl_table_note(t, "Candidate numerologies (3GPP only): 15/30/60/120/240 "
+                      "kHz (Delta f = 15*2^mu), 7.5 kHz (LTE eMBMS), "
+                      "3.75 kHz (NB-IoT uplink), 1.25 kHz (long PRACH). "
+                      "5 kHz is deliberately NOT a candidate: it is not a "
+                      "3GPP numerology (not a 15*2^mu value) and would break "
+                      "OFDM orthogonality with LTE/NR hardware. Non-3GPP "
+                      "spacings are only evaluated by the fallback node when "
+                      "no 3GPP numerology explains the clustering.");
+    for (size_t b = 0; b < c->n_blocks; b++) {
+        const double *values = block_values(c, b);
+        size_t n = c->blocks[b].n;
+        double span, best_df = 0.0, best_R = 0.0, best_p = 1.0;
+        const FclNumerologySpec *best_spec = NULL;
+        double cycles = 0.0;
+
+        if (values == NULL || n < 4) continue;
+        span = block_max(c, b) - block_min(c, b);
+        for (size_t s = 0; s < fcl_n_spacings; s++) {
+            double df = fcl_spacings_hz[s];
+            double mean_angle = 0.0, R = 0.0, p;
+
+            if (df <= 0.0 || span < 1.5 * df) continue;
+            fcl_circular_stats(values, n, 0.0, df, &mean_angle, &R);
+            if (R <= best_R) continue;
+            p = fcl_rayleigh_p(n, R);
+            best_R = R;
+            best_p = p;
+            best_df = df;
+            best_spec = fcl_numerology_for(df, 1.0);
+            cycles = span / df;
+        }
+        if (best_df <= 0.0) {
+            char cells[8][128];
+
+            snprintf(cells[0], sizeof(cells[0]), "%s", c->blocks[b].label);
+            snprintf(cells[1], sizeof(cells[1]), "%zu", n);
+            snprintf(cells[2], sizeof(cells[2]), "%.1f", span / 1e3);
+            snprintf(cells[3], sizeof(cells[3]), "-");
+            snprintf(cells[4], sizeof(cells[4]), "-");
+            snprintf(cells[5], sizeof(cells[5]), "-");
+            snprintf(cells[6], sizeof(cells[6]), "-");
+            snprintf(cells[7], sizeof(cells[7]), "%s",
+                     "span too narrow for any 3GPP numerology");
+            fc_add_cells(t, cells, 8);
+            rows++;
+            continue;
+        }
+        {
+            char cells[8][128];
+
+            snprintf(cells[0], sizeof(cells[0]), "%s", c->blocks[b].label);
+            snprintf(cells[1], sizeof(cells[1]), "%zu", n);
+            snprintf(cells[2], sizeof(cells[2]), "%.1f", span / 1e3);
+            snprintf(cells[3], sizeof(cells[3]), "%.2f", best_df / 1e3);
+            snprintf(cells[4], sizeof(cells[4]), "%s",
+                     best_spec != NULL ? best_spec->name : "3GPP");
+            snprintf(cells[5], sizeof(cells[5]), "%.3f", best_R);
+            snprintf(cells[6], sizeof(cells[6]), "%.3g", best_p);
+            snprintf(cells[7], sizeof(cells[7]), "%.1f", cycles);
+            fc_add_cells(t, cells, 8);
+            rows++;
+        }
+    }
+    fcl_table_note(t, "Rows screened: %zu. A 3GPP spacing with a small "
+                      "asymptotic p is followed up by the permutation tests "
+                      "of the Rayleigh/V/PDM nodes; if none of the 3GPP "
+                      "numerologies shows clustering, the non-3GPP fallback "
+                      "node is evaluated instead.", rows);
+    return t;
+}
+
+/* ------------------------------------------------------------------ */
+/* node: non3gpp-fallback                                             */
+/* ------------------------------------------------------------------ */
+
+/* Fallback spacing scan: only evaluated when NO 3GPP numerology shows
+ * significant subcarrier clustering. Tests the non-3GPP grid with the same
+ * circular statistics and records it as fallback evidence (flagged as
+ * non-3GPP in the evidence structures). */
+static FclTable *analysis_non3gpp_fallback(FcCtx *c)
+{
+    static const char *cols[] = { "Block", "n", "non-3GPP spacing (kHz)",
+                                  "R", "p (permutation)", "PDM p", "cycles" };
+    FclTable *t = fcl_table_new("Non-3GPP spacing fallback scan", cols, 7);
+    size_t significant = 0;
+    size_t rows = 0;
+
+    if (t == NULL) return NULL;
+    if (c->any_clustering) {
+        fcl_table_note(t, "A 3GPP special-channel grid (LTE eMBMS / NB-IoT / "
+                          "PRACH) shows clustering, but no LTE/NR broadband "
+                          "numerology (15..240 kHz) does; the non-3GPP "
+                          "fallback is therefore evaluated as well.");
+    }
+    fcl_table_note(t, "Fallback policy: the primary goal is to test whether "
+                      "the measurements could have been generated by 4G-LTE/"
+                      "5G-NR. The 3GPP numerologies (15/30/60/120/240 kHz, "
+                      "7.5 kHz eMBMS, 3.75 kHz NB-IoT, 1.25 kHz PRACH) are "
+                      "always evaluated first; non-3GPP spacings - including "
+                      "5 kHz - are only considered when no 3GPP numerology "
+                      "explains the clustering. Results here are exploratory "
+                      "fallback evidence, not cellular numerologies.");
+    for (size_t b = 0; b < c->n_blocks; b++) {
+        const double *values = block_values(c, b);
+        size_t n = c->blocks[b].n;
+        double span;
+        size_t reps = reps_for(c);
+        FclRng rng;
+        double best_df = 0.0, best_R = 0.0, best_p = 1.0, best_pdm = 1.0;
+        double best_cycles = 0.0;
+
+        if (values == NULL || n < 4) continue;
+        span = block_max(c, b) - block_min(c, b);
+        fcl_rng_seed(&rng, 0xC0FFEE123456789ULL ^
+                            (unsigned long long)b);
+        for (size_t s = 0; s < fcl_n_non3gpp_spacings; s++) {
+            double df = fcl_non3gpp_spacings_hz[s];
+            double mean_angle = 0.0, R = 0.0, p, pdm_p;
+
+            if (df <= 0.0 || span < 2.0 * df) continue;
+            fcl_circular_stats(values, n, 0.0, df, &mean_angle, &R);
+            if (R <= best_R) continue;
+            p = fcl_perm_rayleigh(values, n, 0.0, df, block_min(c, b),
+                                  block_max(c, b), reps, &rng);
+            pdm_p = fcl_perm_pdm(values, n, 0.0, df, block_min(c, b),
+                                 block_max(c, b), 16, reps, &rng);
+            best_R = R;
+            best_p = p;
+            best_pdm = pdm_p;
+            best_df = df;
+            best_cycles = span / df;
+        }
+        if (best_df <= 0.0) {
+            char cells[7][128];
+
+            snprintf(cells[0], sizeof(cells[0]), "%s", c->blocks[b].label);
+            snprintf(cells[1], sizeof(cells[1]), "%zu", n);
+            snprintf(cells[2], sizeof(cells[2]),
+                     "span too narrow for any non-3GPP candidate");
+            snprintf(cells[3], sizeof(cells[3]), "-");
+            snprintf(cells[4], sizeof(cells[4]), "-");
+            snprintf(cells[5], sizeof(cells[5]), "-");
+            snprintf(cells[6], sizeof(cells[6]), "-");
+            fc_add_cells(t, cells, 7);
+            rows++;
+            continue;
+        }
+        if (best_p < FC_ALPHA) {
+            ctx_add_evidence(c, "non3gpp", b, best_df, 1, best_R, best_p);
+            ctx_note_best(c, b, best_df, best_p);
+            c->non3gpp_used = true;
+            c->any_clustering = true;
+            significant++;
+        }
+        if (best_pdm < FC_ALPHA) {
+            ctx_add_evidence(c, "non3gpp-pdm", b, best_df, 1, best_R,
+                             best_pdm);
+            c->non3gpp_used = true;
+            c->any_clustering = true;
+        }
+        {
+            char cells[7][128];
+
+            snprintf(cells[0], sizeof(cells[0]), "%s", c->blocks[b].label);
+            snprintf(cells[1], sizeof(cells[1]), "%zu", n);
+            snprintf(cells[2], sizeof(cells[2]), "%.2f", best_df / 1e3);
+            snprintf(cells[3], sizeof(cells[3]), "%.3f", best_R);
+            snprintf(cells[4], sizeof(cells[4]), "%.3g", best_p);
+            snprintf(cells[5], sizeof(cells[5]), "%.3g", best_pdm);
+            snprintf(cells[6], sizeof(cells[6]), "%.1f", best_cycles);
+            fc_add_cells(t, cells, 7);
+            rows++;
+        }
+    }
+    fcl_table_note(t, "Fallback spacings tested per block: the best of "
+                      "5/10/20/25/40/50/80/100/200 kHz (a non-3GPP grid); "
+                      "blocks listed: %zu. Significant blocks: %zu. %s",
+                   rows, significant,
+                   significant > 0
+                       ? "The 3GPP numerologies could not explain the data, "
+                         "so non-3GPP spacings are reported as a fallback "
+                         "only."
+                       : "Neither the 3GPP nor the non-3GPP spacings explain "
+                         "the measurements.");
     return t;
 }
 
@@ -2718,6 +2991,12 @@ static bool fc_execute(void *ctx, DagCoreNode *node, char *err, size_t err_len)
     if (id == NULL) return false;
     if (strcmp(id, "blocks") == 0) table = analysis_blocks(c);
     else if (strcmp(id, "drift-correction") == 0) table = analysis_drift(c);
+    else if (strcmp(id, "numerology-screen") == 0) {
+        table = analysis_numerology_screen(c);
+    }
+    else if (strcmp(id, "non3gpp-fallback") == 0) {
+        table = analysis_non3gpp_fallback(c);
+    }
     else if (strcmp(id, "rayleigh") == 0) table = analysis_rayleigh(c);
     else if (strcmp(id, "vtest") == 0) table = analysis_vtest(c);
     else if (strcmp(id, "pdm") == 0) table = analysis_pdm(c);

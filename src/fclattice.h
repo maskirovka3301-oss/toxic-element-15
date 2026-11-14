@@ -92,10 +92,38 @@ void      fcl_blocks_free(FclBlock *blocks);
 /* Human-readable scope name for reports. */
 const char *fcl_scope_name(FclScope scope);
 
-/* Candidate spacings (Hz) and offsets (Hz): LTE/NR numerologies plus a
- * general set. */
+/* 3GPP LTE / 5G NR numerology families. */
+typedef enum {
+    FCL_NUM_UNKNOWN = 0,
+    FCL_NUM_LTE_PRACH,   /* 1.25 kHz, long PRACH formats           */
+    FCL_NUM_NB_IOT,      /* 3.75 kHz, NB-IoT single-tone uplink    */
+    FCL_NUM_LTE_EMBMS,   /* 7.5 kHz, LTE eMBMS                     */
+    FCL_NUM_NR           /* 15/30/60/120/240 kHz (15 * 2^mu)       */
+} FclNumerology;
+
+typedef struct {
+    double        df_hz;
+    FclNumerology family;
+    const char   *name;
+} FclNumerologySpec;
+
+/* The 3GPP numerologies in priority order (15..240 kHz first, then the
+ * dedicated 7.5 / 3.75 / 1.25 kHz channels). 5 kHz is deliberately absent:
+ * it is not a 3GPP numerology. */
+extern const FclNumerologySpec fcl_numerologies[];
+extern const size_t fcl_n_numerologies;
+const FclNumerologySpec *fcl_numerology_for(double df_hz, double tol_hz);
+bool        fcl_is_3gpp_spacing(double df_hz);
+const char *fcl_numerology_name(double df_hz);
+
+/* The 3GPP candidate spacings (Hz) used by every analysis. */
 extern const double fcl_spacings_hz[];
 extern const size_t fcl_n_spacings;
+
+/* Non-3GPP fallback candidate spacings, evaluated only when no 3GPP
+ * numerology can explain the measurements. */
+extern const double fcl_non3gpp_spacings_hz[];
+extern const size_t fcl_n_non3gpp_spacings;
 extern const double fcl_offsets_hz[];
 extern const size_t fcl_n_offsets;
 

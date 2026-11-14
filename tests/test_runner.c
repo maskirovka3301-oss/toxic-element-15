@@ -4441,7 +4441,7 @@ static void test_dagcore(void)
     }
 
     /* the Spectrum and Frequency Counter registries share this engine */
-    CHECK(fc_node_count == 23);
+    CHECK(fc_node_count == 25);
     {
         FcDatasetList list;
         FcRun *fc_run;
@@ -5453,6 +5453,25 @@ static void test_fclattice(void)
                                    NULL));
                         continue;
                     }
+                    if (strcmp(id, "numerology-screen") == 0) {
+                        CHECK(run->nodes[i].status == DAGCORE_DONE);
+                        CHECK(run->nodes[i].payload != NULL);
+                        if (run->nodes[i].payload != NULL) {
+                            FclTable *nt = (FclTable *)run->nodes[i].payload;
+
+                            CHECK(nt->title != NULL &&
+                                  strstr(nt->title, "3GPP LTE/NR") != NULL);
+                            CHECK(nt->notes != NULL &&
+                                  strstr(nt->notes, "5 kHz") != NULL);
+                        }
+                        continue;
+                    }
+                    if (strcmp(id, "non3gpp-fallback") == 0) {
+                        CHECK(run->nodes[i].status == DAGCORE_DONE ||
+                              (run->nodes[i].status == DAGCORE_SKIPPED &&
+                               strstr(run->nodes[i].note, "3GPP") != NULL));
+                        continue;
+                    }
                     if (strcmp(id, "subcarrier-map") == 0) {
                         /* reconstruction runs on the round blocks; it is
                          * done whenever the combined source test ran */
@@ -5521,6 +5540,8 @@ static void test_fclattice(void)
                 CHECK(text != NULL && strstr(text, "ANALYSES") != NULL);
                 CHECK(text != NULL && strstr(text, "15.0") != NULL);
                 CHECK(text != NULL && strstr(text, "Source test") != NULL);
+                CHECK(text != NULL &&
+                      strstr(text, "3GPP LTE/NR numerology screen") != NULL);
                 CHECK(text != NULL && strstr(text, "Verdict:") != NULL);
                 CHECK(text != NULL && strstr(text, "Westfall") != NULL);
                 CHECK(md != NULL && strstr(md, "| Block |") != NULL);
@@ -5551,7 +5572,7 @@ static void test_fcdag(void)
 
     puts("\n-- Frequency Counter analysis DAG --");
     fcd_list_init(&list);
-    CHECK(fc_node_count == 23);   /* the subcarrier-lattice test chain */
+    CHECK(fc_node_count == 25);   /* the subcarrier-lattice test chain */
     {
         /* every analysis in the DAG is a registry node with an executor,
          * so the Settings checkboxes (built from the same registry) can
@@ -5591,7 +5612,7 @@ static void test_fcdag(void)
                                      NULL,
                    strstr(text, "DAG") != NULL);
             CHECK(strstr(text, "FREQUENCY COUNTER ANALYSIS REPORT") != NULL);
-            CHECK(strstr(text, "Registry: 23 analyses") != NULL);
+            CHECK(strstr(text, "Registry: 25 analyses") != NULL);
             CHECK(strstr(text, "schema: fc_dataset.json") != NULL);
             CHECK(strstr(text, "Rayleigh") != NULL ||
                   strstr(text, "Measurement blocks") != NULL);
@@ -5744,22 +5765,65 @@ static void test_fcstats(void)
     remove(path);
 }
 
+/* The 3GPP-first numerology policy: the candidate grid contains only
+ * LTE/NR numerologies (15*2^mu plus the dedicated eMBMS/NB-IoT/PRACH
+ * spacings); 5 kHz is not 3GPP and lives only in the fallback grid. */
+static void test_fc_numerology_grid(void)
+{
+    bool has_5k = false, has_15k = false, has_240k = false;
+    bool has_7500 = false, has_3750 = false, has_1250 = false;
+    bool fallback_5k = false;
+    const FclNumerologySpec *spec;
+
+    puts("\n-- Frequency Counter: 3GPP numerology grid --");
+    for (size_t i = 0; i < fcl_n_spacings; i++) {
+        if (fabs(fcl_spacings_hz[i] - 5000.0) < 1e-9) has_5k = true;
+        if (fabs(fcl_spacings_hz[i] - 15000.0) < 1e-9) has_15k = true;
+        if (fabs(fcl_spacings_hz[i] - 240000.0) < 1e-9) has_240k = true;
+        if (fabs(fcl_spacings_hz[i] - 7500.0) < 1e-9) has_7500 = true;
+        if (fabs(fcl_spacings_hz[i] - 3750.0) < 1e-9) has_3750 = true;
+        if (fabs(fcl_spacings_hz[i] - 1250.0) < 1e-9) has_1250 = true;
+    }
+    for (size_t i = 0; i < fcl_n_non3gpp_spacings; i++) {
+        if (fabs(fcl_non3gpp_spacings_hz[i] - 5000.0) < 1e-9) {
+            fallback_5k = true;
+        }
+    }
+    CHECK(!has_5k);              /* 5 kHz is never a 3GPP candidate */
+    CHECK(fallback_5k);          /* it is only a fallback spacing */
+    CHECK(has_15k && has_240k);  /* 15..240 kHz NR/LTE grid */
+    CHECK(has_7500 && has_3750 && has_1250);
+    CHECK(!fcl_is_3gpp_spacing(5000.0));
+    CHECK(fcl_is_3gpp_spacing(15000.0));
+    CHECK(fcl_is_3gpp_spacing(1250.0));
+    CHECK(!fcl_is_3gpp_spacing(17000.0));
+    spec = fcl_numerology_for(30000.0, 1.0);
+    CHECK(spec != NULL && spec->family == FCL_NUM_NR);
+    CHECK(spec != NULL && strstr(spec->name, "30") != NULL);
+    CHECK(strstr(fcl_numerology_name(15000.0), "NR") != NULL);
+    CHECK(strstr(fcl_numerology_name(5000.0), "non-3GPP") != NULL);
+    CHECK(strstr(fcl_numerology_name(3750.0), "NB-IoT") != NULL);
+    CHECK(strstr(fcl_numerology_name(1250.0), "PRACH") != NULL);
+}
+
 static void test_fc_hypothesis(void)
 {
     static const char *lattice_path = "/tmp/te15_hyp_lattice.json";
     static const char *uniform_path = "/tmp/te15_hyp_uniform.json";
+    static const char *non3gpp_path = "/tmp/te15_hyp_non3gpp.json";
     char json[32768];
     size_t pos;
     FILE *f;
     int kind;
 
     puts("\n-- Frequency Counter source hypothesis test --");
-    for (kind = 0; kind < 2; kind++) {
+    for (kind = 0; kind < 3; kind++) {
         FcDatasetList list;
         FcRun *run;
         char err[256] = "";
         size_t hyp;
-        const char *path = kind == 0 ? lattice_path : uniform_path;
+        const char *path = kind == 0 ? lattice_path
+                          : kind == 1 ? uniform_path : non3gpp_path;
 
         pos = 0;
         pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
@@ -5775,9 +5839,11 @@ static void test_fc_hypothesis(void)
                                 "\"subjects_listed\": [], "
                                 "\"subjects\": [ { \"name\": \"rx\", "
                                 "\"measurements\": [",
-                                kind == 0 ? "lattice" : "uniform",
+                                kind == 0 ? "lattice"
+                                          : kind == 1 ? "uniform" : "non3gpp",
                                 kind == 0 ? "Synthetic lattice"
-                                          : "Uniform noise");
+                                          : kind == 1 ? "Uniform noise"
+                                                      : "Non-3GPP lattice");
         for (int i = 0; i < 120; i++) {
             double v;
 
@@ -5790,11 +5856,19 @@ static void test_fc_hypothesis(void)
 
                 v = 1.0e9 + 15000.0 * (double)j +
                     30.0 * ((double)(h % 1000) / 1000.0 - 0.5);
-            } else {
+            } else if (kind == 1) {
                 /* deterministic pseudo-uniform values in the same band */
                 unsigned long h = (unsigned long)i * 40503ul + 17ul;
 
                 v = 1.0e9 + 1.8e6 * ((double)(h % 1000) / 1000.0);
+            } else {
+                /* a genuine 17 kHz lattice: not an LTE/NR eMBMS/NB-IoT/
+                 * PRACH multiple, so only the non-3GPP fallback fits */
+                unsigned long h = (unsigned long)i * 2654435761ul;
+                int j = (int)((unsigned long)i * 37ul % 120ul);
+
+                v = 1.0e9 + 17000.0 * (double)j +
+                    40.0 * ((double)(h % 1000) / 1000.0 - 0.5);
             }
             pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
                                     "%s%.2f", i > 0 ? ", " : "", v);
@@ -5830,13 +5904,28 @@ static void test_fc_hypothesis(void)
                 CHECK(ht->notes != NULL &&
                       strstr(ht->notes, "Verdict:") != NULL);
                 if (kind == 0) {
-                    printf("  lattice verdict: supported\n");
+                    printf("  lattice verdict: 3GPP-compatible\n");
                     CHECK(strstr(ht->notes, "Best-supported spacing") !=
                           NULL);
-                    CHECK(strstr(ht->notes, "support") != NULL);
-                } else {
+                    CHECK(strstr(ht->notes, "4G-LTE/5G-NR") != NULL);
+                } else if (kind == 1) {
                     printf("  uniform verdict: cannot conclude\n");
                     CHECK(strstr(ht->notes, "Cannot conclude") != NULL);
+                } else {
+                    printf("  non-3GPP verdict: fallback\n");
+                    CHECK(strstr(ht->notes, "non-3GPP") != NULL ||
+                          strstr(ht->notes, "No 3GPP") != NULL);
+                    CHECK(strstr(ht->notes,
+                                 "3GPP LTE/NR compatible: no") != NULL);
+                }
+            }
+            if (kind == 2) {
+                size_t fb = dagcore_find(run, "non3gpp-fallback");
+
+                CHECK(fb != (size_t)-1);
+                if (fb != (size_t)-1) {
+                    CHECK(run->nodes[fb].status == DAGCORE_DONE);
+                    CHECK(run->nodes[fb].payload != NULL);
                 }
             }
             {
@@ -6399,6 +6488,7 @@ int main(void)
     test_fclk();
     test_fcdataset();
     test_fcdag();
+    test_fc_numerology_grid();
     test_fc_hypothesis();
     test_fcstats();
     test_fc_selection_blocks();
