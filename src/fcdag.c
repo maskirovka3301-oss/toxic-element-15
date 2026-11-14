@@ -179,7 +179,9 @@ const DagCoreNodeSpec fc_node_specs[] = {
     { "synthesis", "Synthesis of the most likely subcarrier spacings",
       "evidence-filter" },
     { "hypothesis", "Source test: subcarrier lattice vs chance (combined)",
-      "blocks" }
+      "blocks" },
+    { "subcarrier-map", "Reconstructed subcarriers per round",
+      "hypothesis" }
 };
 const size_t fc_node_count = sizeof(fc_node_specs) / sizeof(fc_node_specs[0]);
 
@@ -195,7 +197,7 @@ static const char *const fc_exec_ids[] = {
     "periodogram", "chisq", "kde", "cluster", "multimodal", "correction",
     "summary", "induced-scan", "k-dispersion", "cf-slope", "mixture-fit",
     "model-select", "k-summary", "evidence-filter", "synthesis",
-    "hypothesis"
+    "hypothesis", "subcarrier-map"
 };
 
 static bool fc_has_executor(const char *id)
@@ -2233,6 +2235,453 @@ out:
 }
 
 /* ------------------------------------------------------------------ */
+/* node: subcarrier-map (reconstructed subcarriers per round)         */
+/* ------------------------------------------------------------------ */
+
+/* log I0(kappa) (Bessel function of the first kind, order 0), needed for
+ * the von Mises density normalisation. Abramowitz & Stegun 9.8.1/9.8.4. */
+static double log_bessel_i0(double k)
+{
+    if (k < 1e-8) return 0.0;
+    if (k < 3.75) {
+        double t = k / 3.75;
+        double t2 = t * t;
+        double y = t2 * (3.5156229 +
+                         t2 * (3.0899424 +
+                               t2 * (1.2067492 +
+                                     t2 * (0.2659732 +
+                                           t2 * (0.0360768 +
+                                                 t2 * 0.0045813)))));
+        return log1p(y);
+    }
+    {
+        double y = 3.75 / k;
+
+        return k - 0.5 * log(k) - 0.5 * log(2.0 * M_PI) +
+               log1p((0.39894228 +
+                      y * (0.01328592 +
+                           y * (0.00225319 +
+                                y * (-0.00157565 +
+                                     y * (0.00916281 +
+                                          y * (-0.02057706 +
+                                               y * (0.02635537 +
+                                                    y * (-0.01647633 +
+                                                         y * 0.00392377)))))))) *
+                     y);
+    }
+}
+
+/* One reconstructed subcarrier set for a measurement round. */
+typedef struct {
+    double spacing_hz;
+    int    K;
+    double phase;        /* global phase offset in [0, 1) */
+    double kappa;        /* von Mises concentration of the fit */
+    double R;            /* mean resultant length at the spacing */
+    double bic;
+    double loglik;
+    size_t n;
+    size_t counts[FCLK_MAX];
+    bool   valid;
+} SubcarrierMap;
+
+/* K-component equal-weight von Mises mixture whose component means sit at
+ * phase + j/K on the unit circle (j = 0..K-1). EM with a shared
+ * concentration; returns the BIC (lower is better) and fills `out`. */
+static bool fit_subcarrier_phases(const double *phases, size_t n, int K,
+                                  double spacing_hz, SubcarrierMap *out)
+{
+    double phase;
+    double kappa;
+    double bic;
+    double prev_ll = -INFINITY;
+    double *post = malloc(n * (size_t)K * sizeof(*post));
+
+    if (post == NULL || n == 0 || K < 1 || K > FCLK_MAX) {
+        free(post);
+        return false;
+    }
+    /* initial phase: circular mean of the phases folded onto 1/K */
+    {
+        double sx = 0.0, sy = 0.0;
+
+        for (size_t i = 0; i < n; i++) {
+            double q = phases[i] * (double)K;
+            double frac = q - floor(q);
+
+            sx += cos(2.0 * M_PI * frac);
+            sy += sin(2.0 * M_PI * frac);
+        }
+        phase = atan2(sy, sx) / (2.0 * M_PI * (double)K);
+        if (phase < 0.0) phase += 1.0 / (double)K;
+    }
+    kappa = 1.0;
+    bic = 0.0;
+    for (int it = 0; it < 64; it++) {
+        double ll = 0.0;
+        double mx = 0.0, my = 0.0, wsum = 0.0;
+
+        for (size_t i = 0; i < n; i++) {
+            double dens[FCLK_MAX];
+            double maxl = -INFINITY;
+            double sum = 0.0;
+
+            for (int j = 0; j < K; j++) {
+                double mu = phase + (double)j / (double)K;
+                double th = 2.0 * M_PI * (phases[i] - mu);
+
+                dens[j] = kappa * cos(th);
+                if (dens[j] > maxl) maxl = dens[j];
+            }
+            for (int j = 0; j < K; j++) {
+                dens[j] = exp(dens[j] - maxl);
+                sum += dens[j];
+            }
+            for (int j = 0; j < K; j++) {
+                double p = dens[j] / sum;
+
+                post[i * (size_t)K + (size_t)j] = p;
+            }
+            ll += maxl + log(sum) - log((double)K);
+            (void)prev_ll;
+        }
+        ll -= (double)n * log(2.0 * M_PI * exp(log_bessel_i0(kappa)));
+        /* M-step: phase from the circular mean of (p_i - j/K) weighted */
+        for (size_t i = 0; i < n; i++) {
+            for (int j = 0; j < K; j++) {
+                double w = post[i * (size_t)K + (size_t)j];
+                double ang = 2.0 * M_PI * (double)K *
+                             (phases[i] - (double)j / (double)K);
+
+                mx += w * cos(ang);
+                my += w * sin(ang);
+                wsum += w;
+            }
+        }
+        if (wsum > 0.0 && (mx != 0.0 || my != 0.0)) {
+            double ang = atan2(my, mx);
+            double newp = ang / (2.0 * M_PI * (double)K);
+
+            newp -= floor(newp * (double)K) / (double)K;
+            phase = newp;
+        }
+        /* M-step: kappa from the shared residual resultant length */
+        {
+            double rx = 0.0, ry = 0.0;
+
+            for (size_t i = 0; i < n; i++) {
+                for (int j = 0; j < K; j++) {
+                    double w = post[i * (size_t)K + (size_t)j];
+                    double th = 2.0 * M_PI *
+                                (phases[i] - phase - (double)j / (double)K);
+
+                    rx += w * cos(th);
+                    ry += w * sin(th);
+                }
+            }
+            if (wsum > 0.0) {
+                double Rb = sqrt(rx * rx + ry * ry) / wsum;
+
+                kappa = vm_kappa(Rb > 0.999999 ? 0.999999 : Rb);
+                if (kappa < 1e-3) kappa = 1e-3;
+            }
+        }
+        if (it > 3 && ll - prev_ll < 1e-7 && ll < prev_ll) break;
+        prev_ll = ll;
+        bic = -2.0 * ll + (double)(K + 2) * log((double)n);
+    }
+    if (!isfinite(bic)) {
+        free(post);
+        return false;
+    }
+    /* usage counts: component with the largest posterior responsibility */
+    memset(out, 0, sizeof(*out));
+    out->spacing_hz = spacing_hz;
+    out->K = K;
+    out->phase = phase;
+    out->kappa = kappa;
+    out->bic = bic;
+    out->n = n;
+    out->valid = true;
+    {
+        double sx = 0.0, sy = 0.0;
+
+        for (size_t i = 0; i < n; i++) {
+            int best = 0;
+
+            for (int j = 1; j < K; j++) {
+                if (post[i * (size_t)K + (size_t)j] >
+                    post[i * (size_t)K + (size_t)best]) {
+                    best = j;
+                }
+            }
+            out->counts[best]++;
+            sx += sin(2.0 * M_PI * phases[i]);
+            sy += cos(2.0 * M_PI * phases[i]);
+        }
+        out->R = sqrt(sx * sx + sy * sy) / (double)n;
+    }
+    free(post);
+    return true;
+}
+
+/* Split a block label "dataset / session X / round Y[/ subject Z]" into
+ * its parts. Returns false for subject-level or unparsable labels. */
+static bool parse_round_label(const char *label, char *dataset,
+                              size_t dataset_len, char *session,
+                              size_t session_len, char *round,
+                              size_t round_len)
+{
+    const char *sess, *sround, *subj;
+    size_t n;
+
+    if (label == NULL) return false;
+    sess = strstr(label, " / session ");
+    if (sess == NULL) return false;
+    sround = strstr(sess + 1, " / round ");
+    if (sround == NULL) return false;
+    subj = strstr(sround + 1, " / subject ");
+    if (subj != NULL) return false;   /* subject-level block */
+    n = (size_t)(sess - label);
+    if (dataset_len > 0) {
+        if (n >= dataset_len) n = dataset_len - 1;
+        memcpy(dataset, label, n);
+        dataset[n] = '\0';
+    }
+    n = (size_t)(sround - sess - 11);
+    if (session_len > 0) {
+        if (n >= session_len) n = session_len - 1;
+        memcpy(session, sess + 11, n);
+        session[n] = '\0';
+    }
+    n = (size_t)((subj != NULL ? subj : label + strlen(label)) -
+                 (sround + 9));
+    if (round_len > 0) {
+        if (n >= round_len) n = round_len - 1;
+        memcpy(round, sround + 9, n);
+        round[n] = '\0';
+    }
+    return true;
+}
+
+/* Reconstruct, for every measurement round in every session of every
+ * dataset, which subcarriers were used: the lattice spacing is selected per
+ * round from the candidate numerologies (plus the spacing with the
+ * strongest retained evidence); for each spacing a K-component equal-weight
+ * von Mises mixture on the folded phases (positions j/K + phase) is fitted
+ * by EM for K = 1..FCLK_MAX and the spacing/K pair with the smallest BIC
+ * wins. The used subcarrier indices, their phase offsets inside one spacing,
+ * the per-subcarrier measurement counts and a reliability verdict are
+ * reported per round. The lattice phase offset is not identifiable from
+ * absolute frequencies alone, so indices are relative to the fitted phase. */
+static FclTable *analysis_subcarrier_map(FcCtx *c)
+{
+    static const char *cols[] = { "Dataset", "Session", "Round", "n",
+                                  "spacing (kHz)", "K", "used subcarriers",
+                                  "phase offsets (kHz)", "counts",
+                                  "R", "verdict" };
+    FclTable *t = fcl_table_new("Reconstructed subcarriers per round", cols,
+                                11);
+    size_t rounds = 0, multi = 0, clear = 0;
+    double evidence_df = 0.0;
+
+    if (t == NULL) return NULL;
+    if (c->n_blocks == 0) {
+        fcl_table_note(t, "No measurement blocks are loaded.");
+        return t;
+    }
+    /* the spacing with the strongest retained evidence is always a
+     * candidate, even when a round's own scan would prefer another one */
+    {
+        double best = -1.0;
+
+        for (size_t i = 0; i < c->n_evidence; i++) {
+            double score;
+
+            if (!c->evidence[i].retained) continue;
+            score = -log10(fmax(1e-300, c->evidence[i].p)) *
+                    c->evidence[i].weight;
+            if (score > best) {
+                best = score;
+                evidence_df = c->evidence[i].spacing_hz;
+            }
+        }
+    }
+    for (size_t b = 0; b < c->n_blocks; b++) {
+        char dataset[128], session[64], round[64];
+        const double *values = block_values(c, b);
+        size_t n = c->blocks[b].n;
+        double span, raw_span;
+        double best_bic = INFINITY;
+        SubcarrierMap best;
+        bool found = false;
+
+        if (values == NULL || n < 6) continue;
+        if (!parse_round_label(c->blocks[b].label, dataset, sizeof(dataset),
+                               session, sizeof(session), round,
+                               sizeof(round))) {
+            continue;
+        }
+        span = block_max(c, b) - block_min(c, b);
+        raw_span = c->blocks[b].max_hz - c->blocks[b].min_hz;
+        /* The warm-up drift model can absorb a genuine frequency ramp when
+         * the measurements happen to be ordered by frequency; the corrected
+         * series then collapses and no lattice can be reconstructed. Fall
+         * back to the raw round values in that case (the reconstruction
+         * only looks at the phase structure, for which the slow trend is
+         * irrelevant). */
+        if (c->drift_values != NULL && c->drift_values[b] != NULL &&
+            raw_span > 0.0 && span < 0.25 * raw_span) {
+            values = c->blocks[b].values;
+            span = raw_span;
+        }
+        memset(&best, 0, sizeof(best));
+        {
+            double cands[16];
+            size_t n_cand = 0;
+
+            for (size_t s = 0; s < fcl_n_spacings && n_cand < 16; s++) {
+                cands[n_cand++] = fcl_spacings_hz[s];
+            }
+            for (size_t i = 0; i < c->n_evidence && n_cand < 16; i++) {
+                bool seen = false;
+
+                if (!c->evidence[i].retained) continue;
+                for (size_t s = 0; s < n_cand; s++) {
+                    if (fabs(cands[s] - c->evidence[i].spacing_hz) < 1.0) {
+                        seen = true;
+                    }
+                }
+                if (!seen) cands[n_cand++] = c->evidence[i].spacing_hz;
+            }
+            if (evidence_df > 0.0) {
+                bool seen = false;
+
+                for (size_t s = 0; s < n_cand; s++) {
+                    if (fabs(cands[s] - evidence_df) < 1.0) seen = true;
+                }
+                if (!seen && n_cand < 16) cands[n_cand++] = evidence_df;
+            }
+            for (size_t s = 0; s < n_cand; s++) {
+                double phases[2048];
+                double df = cands[s];
+                size_t m = n < 2048 ? n : 2048;
+
+                /* at least 1.5 lattice cycles must fit in the span */
+                if (df <= 0.0 || span < 1.5 * df) continue;
+                for (size_t i = 0; i < m; i++) {
+                    phases[i] = fcl_fold(values[i], 0.0, df);
+                }
+                for (int K = 1; K <= FCLK_MAX; K++) {
+                    SubcarrierMap fit;
+
+                    if (!fit_subcarrier_phases(phases, m, K, df, &fit)) {
+                        continue;
+                    }
+                    /* prefer more components only if BIC improves; add a
+                     * small penalty so ties keep the simpler model */
+                    if (!found || fit.bic < best_bic) {
+                        best_bic = fit.bic;
+                        best = fit;
+                        found = true;
+                    }
+                }
+            }
+        }
+        if (!found) {
+            char cells[11][128];
+
+
+            snprintf(cells[0], sizeof(cells[0]), "%s", dataset);
+            snprintf(cells[1], sizeof(cells[1]), "%s", session);
+            snprintf(cells[2], sizeof(cells[2]), "%s", round);
+            snprintf(cells[3], sizeof(cells[3]), "%zu", n);
+            snprintf(cells[4], sizeof(cells[4]), "-");
+            snprintf(cells[5], sizeof(cells[5]), "-");
+            snprintf(cells[6], sizeof(cells[6]), "-");
+            snprintf(cells[7], sizeof(cells[7]), "-");
+            snprintf(cells[8], sizeof(cells[8]), "-");
+            snprintf(cells[9], sizeof(cells[9]), "-");
+            snprintf(cells[10], sizeof(cells[10]),
+                     "cannot reconstruct (span too narrow)");
+            fc_add_cells(t, cells, 11);
+            rounds++;
+            continue;
+        }
+        {
+            char cells[11][128];
+            char used[128] = "";
+            char offsets[128] = "";
+            char counts[128] = "";
+            bool all_used = true;
+            double sep_hz = best.spacing_hz / (double)best.K;
+            double sigma_hz;
+
+            for (int j = 0; j < best.K; j++) {
+                char tmp[32];
+
+                if (best.counts[j] == 0) {
+                    all_used = false;
+                    continue;
+                }
+                snprintf(tmp, sizeof(tmp), "%s%d", used[0] ? "," : "", j);
+                strncat(used, tmp, sizeof(used) - strlen(used) - 1);
+                snprintf(tmp, sizeof(tmp), "%s%.2f",
+                         offsets[0] ? "," : "",
+                         ((best.phase + (double)j / (double)best.K) -
+                          floor(best.phase + (double)j / (double)best.K)) *
+                             best.spacing_hz / 1e3);
+                strncat(offsets, tmp, sizeof(offsets) - strlen(offsets) - 1);
+                snprintf(tmp, sizeof(tmp), "%s%zu",
+                         counts[0] ? "," : "", best.counts[j]);
+                strncat(counts, tmp, sizeof(counts) - strlen(counts) - 1);
+            }
+            (void)all_used;
+            if (best.K > 1) multi++;
+            sigma_hz = (best.kappa > 1e-6)
+                           ? best.spacing_hz /
+                                 (2.0 * M_PI * sqrt(2.0 * best.kappa))
+                           : INFINITY;
+            if (best.K > 1 && sep_hz > 2.0 * sigma_hz) clear++;
+            snprintf(cells[0], sizeof(cells[0]), "%s", dataset);
+            snprintf(cells[1], sizeof(cells[1]), "%s", session);
+            snprintf(cells[2], sizeof(cells[2]), "%s", round);
+            snprintf(cells[3], sizeof(cells[3]), "%zu", n);
+            snprintf(cells[4], sizeof(cells[4]), "%.1f",
+                     best.spacing_hz / 1e3);
+            snprintf(cells[5], sizeof(cells[5]), "%d", best.K);
+            snprintf(cells[6], sizeof(cells[6]), "%s", used);
+            snprintf(cells[7], sizeof(cells[7]), "%s", offsets);
+            snprintf(cells[8], sizeof(cells[8]), "%s", counts);
+            snprintf(cells[9], sizeof(cells[9]), "%.3f", best.R);
+            snprintf(cells[10], sizeof(cells[10]), "%s",
+                     best.K > 1 && sep_hz > 2.0 * sigma_hz
+                         ? "clear multi-subcarrier structure"
+                         : best.K > 1 ? "multiple subcarriers (overlapping)"
+                                      : "single subcarrier per spacing");
+            fc_add_cells(t, cells, 11);
+            rounds++;
+        }
+    }
+    fcl_table_note(t, "Rounds reconstructed: %zu; with more than one "
+                      "subcarrier: %zu (clearly separated: %zu).", rounds,
+                   multi, clear);
+    fcl_table_note(t, "Method: per round the spacing is selected from the "
+                      "LTE/NR numerology grid (plus the best retained "
+                      "evidence spacing) by BIC of an equal-weight von Mises "
+                      "mixture on the phases folded at that spacing; the "
+                      "number of subcarriers K is the same BIC minimisation "
+                      "(K = 1..%d) over the component positions j/K + phase.",
+                   FCLK_MAX);
+    fcl_table_note(t, "Subcarrier indices and phase offsets are relative to "
+                      "the fitted lattice phase: the absolute lattice offset "
+                      "is not identifiable from frequencies alone. 'counts' "
+                      "is the number of measurements assigned to each "
+                      "subcarrier index.");
+    return t;
+}
+
+/* ------------------------------------------------------------------ */
 /* executor dispatch                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -2290,6 +2739,9 @@ static bool fc_execute(void *ctx, DagCoreNode *node, char *err, size_t err_len)
     }
     else if (strcmp(id, "synthesis") == 0) table = analysis_synthesis(c);
     else if (strcmp(id, "hypothesis") == 0) table = analysis_hypothesis(c);
+    else if (strcmp(id, "subcarrier-map") == 0) {
+        table = analysis_subcarrier_map(c);
+    }
     if (table == NULL) return false;
     node->payload = table;
     return true;

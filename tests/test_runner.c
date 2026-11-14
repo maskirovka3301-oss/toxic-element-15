@@ -4440,7 +4440,7 @@ static void test_dagcore(void)
     }
 
     /* the Spectrum and Frequency Counter registries share this engine */
-    CHECK(fc_node_count == 22);
+    CHECK(fc_node_count == 23);
     {
         FcDatasetList list;
         FcRun *fc_run;
@@ -5418,6 +5418,30 @@ static void test_fclattice(void)
                                    NULL));
                         continue;
                     }
+                    if (strcmp(id, "subcarrier-map") == 0) {
+                        /* reconstruction runs on the round blocks; it is
+                         * done whenever the combined source test ran */
+                        CHECK(run->nodes[i].status == DAGCORE_DONE ||
+                              (run->nodes[i].status == DAGCORE_SKIPPED &&
+                               strstr(run->nodes[i].note, "prerequisite") !=
+                                   NULL));
+                        if (run->nodes[i].status == DAGCORE_DONE) {
+                            FclTable *mt =
+                                (FclTable *)run->nodes[i].payload;
+
+                            CHECK(mt != NULL);
+                            if (mt != NULL) {
+                                CHECK(mt->title != NULL &&
+                                      strstr(mt->title,
+                                             "Reconstructed subcarriers") !=
+                                          NULL);
+                                CHECK(mt->n_rows > 0);
+                                CHECK(mt->notes != NULL &&
+                                      strstr(mt->notes, "Method:") != NULL);
+                            }
+                        }
+                        continue;
+                    }
                     if (strcmp(id, "hypothesis") == 0) {
                         /* the combined source test: done when evidence was
                          * retained, skipped (with a rationale) otherwise */
@@ -5492,7 +5516,7 @@ static void test_fcdag(void)
 
     puts("\n-- Frequency Counter analysis DAG --");
     fcd_list_init(&list);
-    CHECK(fc_node_count == 22);   /* the subcarrier-lattice test chain */
+    CHECK(fc_node_count == 23);   /* the subcarrier-lattice test chain */
     {
         /* every analysis in the DAG is a registry node with an executor,
          * so the Settings checkboxes (built from the same registry) can
@@ -5532,7 +5556,7 @@ static void test_fcdag(void)
                                      NULL,
                    strstr(text, "DAG") != NULL);
             CHECK(strstr(text, "FREQUENCY COUNTER ANALYSIS REPORT") != NULL);
-            CHECK(strstr(text, "Registry: 22 analyses") != NULL);
+            CHECK(strstr(text, "Registry: 23 analyses") != NULL);
             CHECK(strstr(text, "schema: fc_dataset.json") != NULL);
             CHECK(strstr(text, "Rayleigh") != NULL ||
                   strstr(text, "Measurement blocks") != NULL);
@@ -5647,6 +5671,30 @@ static void test_fc_hypothesis(void)
                 } else {
                     printf("  uniform verdict: cannot conclude\n");
                     CHECK(strstr(ht->notes, "Cannot conclude") != NULL);
+                }
+            }
+            {
+                size_t map = dagcore_find(run, "subcarrier-map");
+
+                CHECK(map != (size_t)-1);
+                if (map != (size_t)-1) {
+                    CHECK(run->nodes[map].status == DAGCORE_DONE ||
+                          run->nodes[map].status == DAGCORE_SKIPPED);
+                    if (run->nodes[map].status == DAGCORE_DONE) {
+                        FclTable *mt =
+                            (FclTable *)run->nodes[map].payload;
+
+                        CHECK(mt != NULL);
+                        if (mt != NULL) {
+                            CHECK(mt->title != NULL &&
+                                  strstr(mt->title, "Reconstructed") !=
+                                      NULL);
+                            CHECK(mt->n_rows > 0);
+                            CHECK(mt->notes != NULL &&
+                                  strstr(mt->notes, "Rounds reconstructed") !=
+                                      NULL);
+                        }
+                    }
                 }
             }
             fc_dag_free(run);

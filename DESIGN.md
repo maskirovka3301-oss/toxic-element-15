@@ -198,10 +198,12 @@ case):
   uniform null).
 * **Silverman** critical-bandwidth bootstrap for multimodality
   (Hartigan's dip is not implemented in this build).
-* **Dataset selection**: every dataset row in the tree has a checkbox
-  before the expander arrow (checked when the dataset is added). Only the
-  checked datasets are copied into the analysis snapshot, so unchecked
-  datasets are left out of the DAG; the Settings "Analysis scope" radio
+* **Dataset / session / round selection**: every dataset root row, session
+  row and round row in the tree has a checkbox before the expander arrow
+  (all checked when data is added). The session box switches all rounds of
+  that session; the Analyze run copies only the checked datasets and rounds
+  into the worker snapshot, so unchecked datasets and rounds are left out of
+  the DAG; the Settings "Analysis scope" radio
   reads "Analyze selected datasets separately" (per checked dataset) or
   merges the checked datasets into one list.
 * **Multiple testing**: Benjamini-Hochberg and Bonferroni correction per
@@ -255,6 +257,31 @@ no subcarrier clustering was found, the mixture fit when no
 induced-lattice clustering was detected, the CF slope when the K=1
 residual dispersion cannot serve as a single-subcarrier reference, and the
 MDL node always (no signal data).
+
+### Reconstructed subcarriers per round
+
+The final analysis node (`subcarrier-map`, "Reconstructed subcarriers per
+round") reconstructs which subcarriers were used in every measurement round
+of every session of every dataset. For each round block it selects the
+lattice spacing from the LTE/NR numerology grid (plus the spacing with the
+strongest retained evidence) and fits an equal-weight von Mises mixture on
+the phases folded at that spacing, with component means constrained to
+`phase + j/K` (j = 0..K-1) and a shared concentration, via EM; K = 1..6 and
+the spacing are chosen jointly by BIC. The table reports per round the
+dataset/session/round, the number of measurements, the reconstructed
+spacing, K, the used subcarrier indices, their phase offsets inside one
+spacing, the per-subcarrier measurement counts, R and a reliability verdict
+("clear multi-subcarrier structure", "multiple subcarriers (overlapping)"
+or "single subcarrier per spacing"). The notes describe the method and the
+identifiability caveat: the absolute lattice offset is not observable from
+frequencies alone, so the indices/offsets are relative to the fitted phase.
+If the warm-up drift correction absorbed a genuine frequency ramp (the
+corrected round span collapses compared with the raw span), the
+reconstruction falls back to the raw round values, because only the phase
+structure matters here.
+
+Rounds can be excluded from the analysis with the round checkboxes in the
+dataset tree (see below); reconstruction then covers the selected rounds.
 
 ### Combined source hypothesis test
 

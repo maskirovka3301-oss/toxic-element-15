@@ -8038,6 +8038,84 @@ static bool fc_subject_matches(const FcSubject *sj, const char *filter)
            fc_icontains(sj->name, filter);
 }
 
+/* ---- per-round "analyze" flags (flat dataset/session/round order) ------ */
+
+static size_t fc_rounds_total(const Ui *ui)
+{
+    return fcd_list_count_rounds(&ui->fc_datasets);
+}
+
+/* Make room for every round; newly appearing rounds start checked. */
+static bool fc_round_flags_ensure(Ui *ui)
+{
+    size_t total = fc_rounds_total(ui);
+
+    if (total <= ui->fc_round_flags_capacity) return true;
+    {
+        size_t cap = total * 2;
+        bool *n = realloc(ui->fc_round_analyze, cap * sizeof(*n));
+
+        if (n == NULL) return false;
+        for (size_t i = ui->fc_round_flags_capacity; i < cap; i++) {
+            n[i] = true;
+        }
+        ui->fc_round_analyze = n;
+        ui->fc_round_flags_capacity = cap;
+    }
+    return true;
+}
+
+static long fc_round_flat(const Ui *ui, int di, int si, int ri)
+{
+    long flat = 0;
+
+    if (di < 0 || si < 0 || ri < 0) return -1;
+    if ((size_t)di >= ui->fc_datasets.count) return -1;
+    for (int d = 0; d < di; d++) {
+        const FcDataset *ds = &ui->fc_datasets.items[d];
+
+        for (size_t s = 0; s < ds->n_sessions; s++) {
+            flat += (long)ds->sessions[s].n_rounds;
+        }
+    }
+    {
+        const FcDataset *ds = &ui->fc_datasets.items[di];
+
+        if ((size_t)si >= ds->n_sessions) return -1;
+        for (int s = 0; s < si; s++) {
+            flat += (long)ds->sessions[s].n_rounds;
+        }
+        if ((size_t)ri >= ds->sessions[si].n_rounds) return -1;
+        flat += ri;
+    }
+    return flat;
+}
+
+static bool fc_round_is_selected(const Ui *ui, int di, int si, int ri)
+{
+    long flat = fc_round_flat(ui, di, si, ri);
+
+    if (flat < 0 || (size_t)flat >= ui->fc_round_flags_capacity) return true;
+    return ui->fc_round_analyze[flat];
+}
+
+/* True when every round of the session is checked for analysis. */
+static bool fc_session_all_selected(const Ui *ui, int di, int si)
+{
+    if (di < 0 || si < 0 || (size_t)di >= ui->fc_datasets.count) return false;
+    {
+        const FcDataset *ds = &ui->fc_datasets.items[di];
+
+        if ((size_t)si >= ds->n_sessions) return false;
+        for (size_t r = 0; r < ds->sessions[si].n_rounds; r++) {
+            if (!fc_round_is_selected(ui, di, si, (int)r)) return false;
+        }
+    }
+    return true;
+}
+
+/* Flat flag index of (dataset, session, round); -1 when out of range. */
+
 static void fc_tree_append(Ui *ui, GtkTreeIter *it, GtkTreeIter *parent,
                            const char *item, const char *id,
                            const char *details, size_t measurements,
@@ -8049,20 +8127,40 @@ static void fc_tree_append(Ui *ui, GtkTreeIter *it, GtkTreeIter *parent,
                        (int)(measurements > 999999 ? 999999 : measurements),
                        FC_T_KIND, kind, FC_T_DATASET, di, FC_T_SESSION, si,
                        FC_T_ROUND, ri, FC_T_SUBJECT, ji, FC_T_ANALYZE,
-                       kind == FC_KIND_DATASET && di >= 0 &&
-                           di < FC_MAX_DATASETS &&
-                           ui->fc_dataset_analyze[di], -1);
+                       (kind == FC_KIND_DATASET && di >= 0 &&
+                        di < FC_MAX_DATASETS &&
+                        ui->fc_dataset_analyze[di]) ||
+                           (kind == FC_KIND_ROUND &&
+                            fc_round_is_selected(ui, di, si, ri)) ||
+                           (kind == FC_KIND_SESSION &&
+                            fc_session_all_selected(ui, di, si)), -1);
 }
 
 /* Per-dataset "analyze" checkbox: toggling it marks the dataset included
  * or excluded from the next Analyze run. */
+/* Show the "analyze" checkbox only on dataset and round rows. */
+static void fc_analyze_cell_data(GtkTreeViewColumn *column,
+                                 GtkCellRenderer *cell, GtkTreeModel *model,
+                                 GtkTreeIter *iter, gpointer user_data)
+{
+    int kind = -1;
+    gboolean show;
+
+    (void)column;
+    (void)user_data;
+    gtk_tree_model_get(model, iter, FC_T_KIND, &kind, -1);
+    show = kind == FC_KIND_DATASET || kind == FC_KIND_SESSION ||
+           kind == FC_KIND_ROUND;
+    g_object_set(cell, "visible", show, "activatable", show, NULL);
+}
+
 static gboolean on_fc_dataset_toggled(GtkCellRendererToggle *renderer,
                                       char *path, gpointer user_data)
 {
     Ui *ui = (Ui *)user_data;
     GtkTreeIter it;
     GtkTreePath *tp = gtk_tree_path_new_from_string(path);
-    int kind = -1, di = -1;
+    int kind = -1, di = -1, si = -1, ri = -1;
     gboolean active = FALSE;
 
     (void)renderer;
@@ -8073,28 +8171,100 @@ static gboolean on_fc_dataset_toggled(GtkCellRendererToggle *renderer,
     }
     gtk_tree_path_free(tp);
     gtk_tree_model_get(GTK_TREE_MODEL(ui->fc_model), &it, FC_T_KIND, &kind,
-                       FC_T_DATASET, &di, -1);
-    if (kind != FC_KIND_DATASET || di < 0 || di >= FC_MAX_DATASETS) {
-        return FALSE;
-    }
+                       FC_T_DATASET, &di, FC_T_SESSION, &si, FC_T_ROUND, &ri,
+                       -1);
     gtk_tree_model_get(GTK_TREE_MODEL(ui->fc_model), &it, FC_T_ANALYZE,
                        &active, -1);
     active = active ? FALSE : TRUE;
-    ui->fc_dataset_analyze[di] = active != FALSE;
-    gtk_tree_store_set(ui->fc_model, &it, FC_T_ANALYZE, active, -1);
+    if (kind == FC_KIND_DATASET) {
+        if (di < 0 || di >= FC_MAX_DATASETS) return FALSE;
+        ui->fc_dataset_analyze[di] = active != FALSE;
+        gtk_tree_store_set(ui->fc_model, &it, FC_T_ANALYZE, active, -1);
+    } else if (kind == FC_KIND_SESSION) {
+        /* a session checkbox stands for all of its rounds: clicking it
+         * checks or unchecks every round of that session */
+        const FcDataset *ds;
+        size_t n_rounds;
+
+        if (di < 0 || si < 0 || (size_t)di >= ui->fc_datasets.count) {
+            return FALSE;
+        }
+        ds = &ui->fc_datasets.items[di];
+        if ((size_t)si >= ds->n_sessions) return FALSE;
+        n_rounds = ds->sessions[si].n_rounds;
+        fc_round_flags_ensure(ui);
+        active = fc_session_all_selected(ui, di, si) ? FALSE : TRUE;
+        for (size_t r = 0; r < n_rounds; r++) {
+            long flat = fc_round_flat(ui, di, si, (int)r);
+
+            if (flat >= 0 && (size_t)flat < ui->fc_round_flags_capacity) {
+                ui->fc_round_analyze[flat] = active != FALSE;
+            }
+        }
+        gtk_tree_store_set(ui->fc_model, &it, FC_T_ANALYZE, active, -1);
+        {
+            GtkTreeIter child;
+            int n = gtk_tree_model_iter_n_children(
+                GTK_TREE_MODEL(ui->fc_model), &it);
+
+            for (int k = 0; k < n; k++) {
+                if (gtk_tree_model_iter_nth_child(GTK_TREE_MODEL(
+                                                      ui->fc_model),
+                                                  &child, &it, k)) {
+                    gtk_tree_store_set(ui->fc_model, &child, FC_T_ANALYZE,
+                                       active, -1);
+                }
+            }
+        }
+    } else if (kind == FC_KIND_ROUND) {
+        long flat = fc_round_flat(ui, di, si, ri);
+
+        if (flat < 0 || (size_t)flat >= ui->fc_round_flags_capacity) {
+            return FALSE;
+        }
+        ui->fc_round_analyze[flat] = active != FALSE;
+        gtk_tree_store_set(ui->fc_model, &it, FC_T_ANALYZE, active, -1);
+        /* keep the parent session row's summary state in sync */
+        {
+            GtkTreeIter parent;
+
+            if (gtk_tree_model_iter_parent(GTK_TREE_MODEL(ui->fc_model),
+                                           &parent, &it)) {
+                int pkind = -1, pdi = -1, psi = -1;
+
+                gtk_tree_model_get(GTK_TREE_MODEL(ui->fc_model), &parent,
+                                   FC_T_KIND, &pkind, FC_T_DATASET, &pdi,
+                                   FC_T_SESSION, &psi, -1);
+                if (pkind == FC_KIND_SESSION) {
+                    gtk_tree_store_set(ui->fc_model, &parent, FC_T_ANALYZE,
+                                       fc_session_all_selected(ui, pdi, psi),
+                                       -1);
+                }
+            }
+        }
+    } else {
+        return FALSE;
+    }
     if (ui->fc_status_label != NULL) {
-        size_t selected = 0;
+        size_t selected = 0, rounds = 0, rounds_total = 0;
 
         for (size_t i = 0; i < ui->fc_datasets.count &&
                            i < FC_MAX_DATASETS; i++) {
             if (ui->fc_dataset_analyze[i]) selected++;
         }
+        rounds_total = fc_rounds_total(ui);
+        for (size_t i = 0; i < rounds_total &&
+                           i < ui->fc_round_flags_capacity; i++) {
+            if (ui->fc_round_analyze[i]) rounds++;
+        }
         {
-            char msg[256];
+            char msg[320];
 
-            snprintf(msg, sizeof(msg), "%zu of %zu dataset%s selected for "
-                     "analysis.", selected, ui->fc_datasets.count,
-                     ui->fc_datasets.count == 1 ? "" : "s");
+            snprintf(msg, sizeof(msg), "%zu of %zu dataset%s and %zu of %zu "
+                     "round%s selected for analysis.", selected,
+                     ui->fc_datasets.count,
+                     ui->fc_datasets.count == 1 ? "" : "s", rounds,
+                     rounds_total, rounds_total == 1 ? "" : "s");
             gtk_label_set_text(GTK_LABEL(ui->fc_status_label), msg);
         }
     }
@@ -8107,6 +8277,23 @@ static gboolean on_fc_dataset_toggled(GtkCellRendererToggle *renderer,
 static bool fc_analyze_snapshot(Ui *ui, FcDatasetList *out)
 {
     if (!fcd_list_clone(&ui->fc_datasets, out)) return false;
+    /* unchecked rounds are removed first (the flat flag order follows the
+     * original dataset list, which matches the clone at this point) */
+    for (size_t d = 0; d < ui->fc_datasets.count; d++) {
+        const FcDataset *ds = &ui->fc_datasets.items[d];
+
+        for (size_t s = 0; s < ds->n_sessions; s++) {
+            const FcSession *ss = &ds->sessions[s];
+
+            for (size_t r = ss->n_rounds; r > 0; r--) {
+                size_t ri = r - 1;
+
+                if (!fc_round_is_selected(ui, (int)d, (int)s, (int)ri)) {
+                    fcd_remove_round(&out->items[d], s, ri);
+                }
+            }
+        }
+    }
     for (size_t i = out->count; i > 0; i--) {
         size_t idx = i - 1;
 
@@ -8131,6 +8318,7 @@ static size_t fc_analyze_selected(const Ui *ui)
 
 static void fc_tree_build(Ui *ui, const char *filter)
 {
+    fc_round_flags_ensure(ui);
     gtk_tree_store_clear(ui->fc_model);
     for (size_t d = 0; d < ui->fc_datasets.count; d++) {
         const FcDataset *ds = &ui->fc_datasets.items[d];
@@ -8352,6 +8540,7 @@ static void fc_load_paths(Ui *ui, char *const *paths, size_t n_paths)
             snprintf(last_err, sizeof(last_err), "%s", err);
         }
     }
+    fc_round_flags_ensure(ui);
     fc_rebuild(ui, false);
     if (loaded > 0) {
         GtkTreePath *path = gtk_tree_path_new_from_indices((int)first, -1);
@@ -8489,9 +8678,25 @@ static void on_fc_remove_clicked(GtkButton *button, gpointer user_data)
 {
     Ui *ui = (Ui *)user_data;
     int kind, di = -1, si = -1, ri = -1, ji = -1;
+    size_t old_total, removed_offset = 0, removed_count = 0;
+    bool *old_flags = NULL;
 
     (void)button;
     if (!fc_selection(ui, &kind, &di, &si, &ri, &ji) || di < 0) return;
+    /* remember the per-round flags so the removed dataset's entries can be
+     * dropped while the remaining ones are kept */
+    old_total = fc_rounds_total(ui);
+    for (int d = 0; d < di && (size_t)d < ui->fc_datasets.count; d++) {
+        removed_offset += (size_t)fcd_count_rounds(&ui->fc_datasets.items[d]);
+    }
+    removed_count = (size_t)fcd_count_rounds(&ui->fc_datasets.items[di]);
+    if (old_total > 0 && ui->fc_round_analyze != NULL) {
+        old_flags = malloc(old_total * sizeof(*old_flags));
+        if (old_flags != NULL) {
+            memcpy(old_flags, ui->fc_round_analyze,
+                   old_total * sizeof(*old_flags));
+        }
+    }
     fcd_list_remove(&ui->fc_datasets, (size_t)di);
     if ((size_t)di < FC_MAX_DATASETS) {
         for (size_t i = (size_t)di; i + 1 < ui->fc_datasets.count + 1 &&
@@ -8501,6 +8706,29 @@ static void on_fc_remove_clicked(GtkButton *button, gpointer user_data)
         if (ui->fc_datasets.count < FC_MAX_DATASETS) {
             ui->fc_dataset_analyze[ui->fc_datasets.count] = true;
         }
+    }
+    if (old_flags != NULL) {
+        size_t new_total = old_total > removed_count
+                               ? old_total - removed_count : 0;
+        size_t cap = new_total * 2 + 1;
+        bool *nf = malloc(cap * sizeof(*nf));
+
+        if (nf != NULL) {
+            size_t out = 0;
+
+            for (size_t i = 0; i < old_total; i++) {
+                if (i >= removed_offset &&
+                    i < removed_offset + removed_count) {
+                    continue;
+                }
+                if (out < new_total) nf[out++] = old_flags[i];
+            }
+            while (out < cap) nf[out++] = true;
+            free(ui->fc_round_analyze);
+            ui->fc_round_analyze = nf;
+            ui->fc_round_flags_capacity = cap;
+        }
+        free(old_flags);
     }
     fc_rebuild(ui, false);
     fc_show_details(ui);
@@ -8519,6 +8747,9 @@ static void on_fc_remove_all_clicked(GtkButton *button, gpointer user_data)
 
     (void)button;
     fcd_list_clear(&ui->fc_datasets);
+    free(ui->fc_round_analyze);
+    ui->fc_round_analyze = NULL;
+    ui->fc_round_flags_capacity = 0;
     for (size_t i = 0; i < FC_MAX_DATASETS; i++) {
         ui->fc_dataset_analyze[i] = true;
     }
@@ -8684,6 +8915,14 @@ static void on_fc_analyze_clicked(GtkButton *button, gpointer user_data)
         free(job);
         gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
                            "Out of memory copying the datasets.");
+        return;
+    }
+    if (fcd_list_count_measurements(&job->snapshot) == 0) {
+        fcd_list_clear(&job->snapshot);
+        free(job);
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
+                           "No measurements selected: check a dataset and at "
+                           "least one of its rounds in the tree.");
         return;
     }
     ui->fc_job = job;
@@ -8863,6 +9102,8 @@ static GtkWidget *build_fc_left_panel(Ui *ui)
                          G_CALLBACK(on_fc_dataset_toggled), ui);
         tog_col = gtk_tree_view_column_new_with_attributes(
             "", tog, "active", FC_T_ANALYZE, NULL);
+        gtk_tree_view_column_set_cell_data_func(
+            tog_col, tog, fc_analyze_cell_data, NULL, NULL);
         gtk_tree_view_column_set_clickable(tog_col, FALSE);
         gtk_tree_view_append_column(GTK_TREE_VIEW(tv), tog_col);
         {

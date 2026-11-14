@@ -655,6 +655,26 @@ void fcd_list_remove(FcDatasetList *list, size_t index)
     memset(&list->items[list->count], 0, sizeof(*list->items));
 }
 
+/* Remove one measurement round (session si, round ri) from a dataset and
+ * free everything it owns. Used to exclude unchecked rounds from the
+ * analysis snapshot. Returns false when the indices are out of range. */
+bool fcd_remove_round(FcDataset *ds, size_t si, size_t ri)
+{
+    FcSession *ss;
+
+    if (ds == NULL || si >= ds->n_sessions) return false;
+    ss = &ds->sessions[si];
+    if (ri >= ss->n_rounds) return false;
+    round_free(&ss->rounds[ri]);
+    if (ri + 1 < ss->n_rounds) {
+        memmove(&ss->rounds[ri], &ss->rounds[ri + 1],
+                (ss->n_rounds - ri - 1) * sizeof(*ss->rounds));
+    }
+    ss->n_rounds--;
+    memset(&ss->rounds[ss->n_rounds], 0, sizeof(*ss->rounds));
+    return true;
+}
+
 /* ------------------------------------------------------------------ */
 /* deep copy                                                          */
 /* ------------------------------------------------------------------ */

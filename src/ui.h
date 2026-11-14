@@ -330,6 +330,9 @@ typedef struct Ui {
     FcDatasetList fc_datasets;       /* loaded measurement datasets     */
     /* per-dataset "analyze this dataset" checkboxes (true for new datasets) */
     bool          fc_dataset_analyze[FC_MAX_DATASETS];
+    /* per-round "analyze" flags, flat dataset -> session -> round order */
+    bool         *fc_round_analyze;
+    size_t        fc_round_flags_capacity;
     GtkWidget  *fc_view;             /* dataset/session tree (GtkTreeView) */
     GtkTreeStore *fc_model;          /* its model                       */
     GtkWidget  *fc_details_view;     /* schema details of the selection */
