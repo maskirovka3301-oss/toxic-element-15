@@ -297,6 +297,20 @@ induced-lattice clustering was detected, the CF slope when the K=1
 residual dispersion cannot serve as a single-subcarrier reference, and the
 MDL node always (no signal data).
 
+### CSV export
+
+The Frequency Counter toolbar has a CSV export control: the "CSV rows"
+combo chooses whether the exported table has one row per selected **round**,
+per selected **session** or per selected **dataset**, and "Export CSV…"
+writes the file. The export uses the same selection as the analyses (only
+checked datasets and checked frequency lists are included); each row holds
+the identity columns (dataset, and session/round when applicable), the
+number of frequency lists, the number of measurements and the descriptive
+statistics of the values in Hz (mean, standard deviation, minimum, median,
+maximum). Rows without measurements are omitted; fields are CSV-quoted when
+needed. The generator lives in `fcexport.c` (`fc_csv_export()`), separate
+from GTK so it is unit-tested.
+
 ### Statistics tab
 
 The Frequency Counter notebook has a Statistics tab, separate from the
@@ -326,9 +340,9 @@ The report is organised from the finest to the coarsest selection level:
 first a complete statistics block for every selected ROUND that has checked
 frequency lists ("PER-ROUND STATISTICS", heading "Round: <dataset> / session
 / round"), then for every selected SESSION ("PER-SESSION STATISTICS"), then
-the "ALL SELECTED DATA" block with the same statistics over every selected
-frequency list, and finally the per-dataset round-mean/Allan-deviation
-table. Each block contains the descriptive and robust statistics, the
+for every selected DATASET ("PER-DATASET STATISTICS"), then the "ALL
+SELECTED DATA" block with the same statistics over every selected frequency
+list, and finally the per-dataset round-mean/Allan-deviation table. Each block contains the descriptive and robust statistics, the
 Jarque-Bera normality diagnostic, the bootstrap confidence intervals and the
 two-level population estimates (ICC, design effect, effective n, cluster
 bootstrap) for exactly that level's checked lists.

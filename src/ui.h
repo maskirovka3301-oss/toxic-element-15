@@ -364,6 +364,8 @@ typedef struct Ui {
     GtkWidget  *fc_remove_all_btn;
     GtkWidget  *fc_expand_btn;
     GtkWidget  *fc_collapse_btn;
+    GtkWidget  *fc_csv_gran_combo;   /* CSV export granularity          */
+    GtkWidget  *fc_csv_btn;          /* "Export CSV…"                   */
     GtkWidget  *fc_analyze_btn;      /* Analysis pane controls          */
     GtkWidget  *fc_progress;
     GtkWidget  *fc_status_label;

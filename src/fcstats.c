@@ -657,6 +657,29 @@ char *fc_stats_report(const FcDatasetList *list, FclScope scope,
         }
     }
 
+    /* Then the statistics per dataset (checked frequency lists only). */
+    buf_add(&b, "\nPER-DATASET STATISTICS\n");
+    buf_add(&b, "======================\n");
+    {
+        size_t printed = 0;
+
+        for (size_t d = 0; d < list->count; d++) {
+            const FcDataset *ds = &list->items[d];
+            Sample one;
+            char heading[512];
+
+            if (!sample_build(list, (long)d, -1, -1, &one)) continue;
+            snprintf(heading, sizeof(heading), "Dataset: %s",
+                     ds->title != NULL ? ds->title : ds->dataset_id);
+            render_block(&b, &one, heading, opt.confidence, opt.bootstrap);
+            sample_free(&one);
+            printed++;
+        }
+        if (printed == 0) {
+            buf_add(&b, "  (no dataset has selected frequency lists)\n");
+        }
+    }
+
     /* Then the statistics over all selected data. */
     buf_add(&b, "\nALL SELECTED DATA\n");
     buf_add(&b, "=================\n");

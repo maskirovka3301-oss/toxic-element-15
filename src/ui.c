@@ -44,6 +44,7 @@
 #include "about_image.h"
 #include "fcdag.h"
 #include "fcstats.h"
+#include "fcexport.h"
 #include "fcreport.h"
 #include "fcdataset.h"
 #include "fit.h"
@@ -9835,6 +9836,85 @@ static void on_fc_save_report(GtkButton *button, gpointer user_data)
 
 /* ---- the page --------------------------------------------------------- */
 
+/* Export the selected measurements (checked datasets and frequency lists)
+ * as CSV. The combo chooses whether a row is a round, a session or a
+ * dataset. */
+static void on_fc_csv_export_clicked(GtkButton *button, gpointer user_data)
+{
+    Ui *ui = (Ui *)user_data;
+    FcDatasetList snap;
+    FcCsvGranularity gran = FC_CSV_ROUND;
+    char *text;
+    GtkWidget *dialog;
+
+    (void)button;
+    if (ui->fc_datasets.count == 0) {
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
+                           "No datasets loaded: load measurement data first.");
+        return;
+    }
+    if (ui->fc_csv_gran_combo != NULL) {
+        int idx = gtk_combo_box_get_active(
+            GTK_COMBO_BOX(ui->fc_csv_gran_combo));
+
+        gran = idx == 1 ? FC_CSV_SESSION
+                        : idx == 2 ? FC_CSV_DATASET : FC_CSV_ROUND;
+    }
+    fcd_list_init(&snap);
+    if (!fc_analyze_snapshot(ui, &snap)) {
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
+                           "Out of memory copying the datasets.");
+        return;
+    }
+    if (fcd_list_count_measurements(&snap) == 0) {
+        fcd_list_clear(&snap);
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
+                           "No measurements selected: check at least one "
+                           "frequency list in the tree.");
+        return;
+    }
+    text = fc_csv_export(&snap, gran);
+    fcd_list_clear(&snap);
+    if (text == NULL) {
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
+                           "Out of memory building the CSV export.");
+        return;
+    }
+    dialog = gtk_file_chooser_dialog_new(
+        "Export selected measurements as CSV", GTK_WINDOW(ui->window),
+        GTK_FILE_CHOOSER_ACTION_SAVE, "Cancel", GTK_RESPONSE_CANCEL,
+        "Export", GTK_RESPONSE_ACCEPT, NULL);
+    {
+        char name[64];
+
+        snprintf(name, sizeof(name), "fc_export_%s.csv",
+                 fc_csv_granularity_name(gran));
+        gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dialog), name);
+    }
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char *filename = gtk_file_chooser_get_filename(
+            GTK_FILE_CHOOSER(dialog));
+        FILE *f = filename != NULL ? fopen(filename, "wb") : NULL;
+
+        if (f != NULL) {
+            fwrite(text, 1, strlen(text), f);
+            fclose(f);
+            if (ui->fc_status_label != NULL) {
+                char msg[512];
+
+                snprintf(msg, sizeof(msg),
+                         "Exported the selected measurements as CSV (one "
+                         "row per %s) to %s",
+                         fc_csv_granularity_name(gran), filename);
+                gtk_label_set_text(GTK_LABEL(ui->fc_status_label), msg);
+            }
+        }
+        g_free(filename);
+    }
+    gtk_widget_destroy(dialog);
+    free(text);
+}
+
 static GtkWidget *build_fc_left_panel(Ui *ui)
 {
     GtkWidget *left = gtk_box_new(GTK_ORIENTATION_VERTICAL, PAGE_SPACING);
@@ -9882,6 +9962,29 @@ static GtkWidget *build_fc_left_panel(Ui *ui)
         gtk_flow_box_insert(GTK_FLOW_BOX(toolbar), save_btn, -1);
         gtk_flow_box_insert(GTK_FLOW_BOX(toolbar), rm, -1);
         gtk_flow_box_insert(GTK_FLOW_BOX(toolbar), rm_all, -1);
+        {
+            GtkWidget *lbl = gtk_label_new("CSV rows:");
+            GtkWidget *combo = gtk_combo_box_text_new();
+
+            gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(combo),
+                                           "per round");
+            gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(combo),
+                                           "per session");
+            gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(combo),
+                                           "per dataset");
+            gtk_combo_box_set_active(GTK_COMBO_BOX(combo), 0);
+            gtk_flow_box_insert(GTK_FLOW_BOX(toolbar), lbl, -1);
+            gtk_flow_box_insert(GTK_FLOW_BOX(toolbar), combo, -1);
+            ui->fc_csv_gran_combo = combo;
+            ui->fc_csv_btn = gtk_button_new_with_label("Export CSV…");
+            gtk_widget_set_tooltip_text(
+                ui->fc_csv_btn,
+                "Export the checked measurements as CSV, with one row per "
+                "selected round, session or dataset (chosen on the left)");
+            g_signal_connect(ui->fc_csv_btn, "clicked",
+                             G_CALLBACK(on_fc_csv_export_clicked), ui);
+            gtk_flow_box_insert(GTK_FLOW_BOX(toolbar), ui->fc_csv_btn, -1);
+        }
     }
     gtk_box_pack_start(GTK_BOX(left), toolbar, FALSE, FALSE, 0);
 

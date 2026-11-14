@@ -51,6 +51,7 @@
 #include "dagcore.h"
 #include "fcdag.h"
 #include "fcstats.h"
+#include "fcexport.h"
 #include "fcreport.h"
 #include "fcdataset.h"
 #include "fcdrift.h"
@@ -5639,6 +5640,92 @@ static void test_fcdag(void)
 /* The analysis blocks must contain only the measurements of the frequency
  * lists that remain in the dataset (the UI's selection snapshot is built by
  * removing the unchecked lists/rounds before the DAG runs). */
+/* CSV export of the selected measurements: row granularity round / session
+ * / dataset, values aggregated over the remaining (selected) lists. */
+static void test_fc_csv_export(void)
+{
+    static const char *path = "/tmp/te15_csv.json";
+    static const char *json =
+        "{ \"dataset_id\": \"csv\", \"source_file\": \"c.csv\", "
+        "\"title\": \"CSV test\", \"notes\": [], \"sessions\": [ { "
+        "\"session_id\": 1, \"rounds\": [ { \"round_id\": \"r1\", "
+        "\"location\": null, \"date\": null, \"coordinates\": null, "
+        "\"closest_towers_enb_ids\": null, \"context\": null, "
+        "\"subjects_listed\": [], \"subjects\": [ "
+        "{\"name\": \"a\", \"measurements\": [1.0, 2.0]}, "
+        "{\"name\": \"b\", \"measurements\": [3.0]} ] }, "
+        "{ \"round_id\": \"r2\", \"location\": null, \"date\": null, "
+        "\"coordinates\": null, \"closest_towers_enb_ids\": null, "
+        "\"context\": null, \"subjects_listed\": [], \"subjects\": [ "
+        "{\"name\": \"c\", \"measurements\": [4.0, 5.0]} ] } ] }, "
+        "{ \"session_id\": 2, \"rounds\": [ { \"round_id\": \"r1\", "
+        "\"location\": null, \"date\": null, \"coordinates\": null, "
+        "\"closest_towers_enb_ids\": null, \"context\": null, "
+        "\"subjects_listed\": [], \"subjects\": [ "
+        "{\"name\": \"d\", \"measurements\": [6.0]} ] } ] } ] }";
+    FcDatasetList list;
+    FILE *f;
+    char *csv;
+    size_t rows;
+
+    puts("\n-- Frequency Counter CSV export --");
+    fcd_list_init(&list);
+    f = fopen(path, "w");
+    CHECK(f != NULL);
+    if (f == NULL) return;
+    fputs(json, f);
+    fclose(f);
+    CHECK(fcd_load_file(&list, path, NULL, 0));
+    CHECK(list.count == 1);
+    /* drop frequency list b: the export must only use the selected lists */
+    CHECK(fcd_remove_subject(&list.items[0], 0, 0, 1));
+
+    csv = fc_csv_export(&list, FC_CSV_ROUND);
+    CHECK(csv != NULL);
+    if (csv != NULL) {
+        rows = 0;
+        for (const char *p = csv; *p != '\0'; p++) {
+            if (*p == '\n') rows++;
+        }
+        printf("  round CSV rows (incl. header): %zu\n", rows);
+        CHECK(strstr(csv, "dataset,session,round,frequency_lists,"
+                          "measurements,mean_hz") != NULL);
+        CHECK(rows == 4);               /* header + 3 rounds */
+        CHECK(strstr(csv, "1.500000") != NULL);   /* r1: 1, 2 */
+        CHECK(strstr(csv, "4.500000") != NULL);   /* r2: 4, 5 */
+        CHECK(strstr(csv, "6.000000") != NULL);   /* session 2 round */
+        free(csv);
+    }
+    csv = fc_csv_export(&list, FC_CSV_SESSION);
+    CHECK(csv != NULL);
+    if (csv != NULL) {
+        rows = 0;
+        for (const char *p = csv; *p != '\0'; p++) {
+            if (*p == '\n') rows++;
+        }
+        printf("  session CSV rows (incl. header): %zu\n", rows);
+        CHECK(strstr(csv, "dataset,session,frequency_lists") != NULL);
+        CHECK(rows == 3);               /* header + 2 sessions */
+        CHECK(strstr(csv, "3.000000") != NULL);   /* s1: 1,2,4,5 */
+        free(csv);
+    }
+    csv = fc_csv_export(&list, FC_CSV_DATASET);
+    CHECK(csv != NULL);
+    if (csv != NULL) {
+        rows = 0;
+        for (const char *p = csv; *p != '\0'; p++) {
+            if (*p == '\n') rows++;
+        }
+        printf("  dataset CSV rows (incl. header): %zu\n", rows);
+        CHECK(strstr(csv, "dataset,frequency_lists") != NULL);
+        CHECK(rows == 2);               /* header + 1 dataset */
+        CHECK(strstr(csv, "3.600000") != NULL);   /* 1,2,4,5,6 */
+        free(csv);
+    }
+    fcd_list_clear(&list);
+    remove(path);
+}
+
 static void test_fc_selection_blocks(void)
 {
     static const char *path = "/tmp/te15_sel_blocks.json";
@@ -5737,7 +5824,9 @@ static void test_fcstats(void)
         CHECK(strstr(text, "FREQUENCY COUNTER STATISTICS") != NULL);
         CHECK(strstr(text, "PER-ROUND STATISTICS") != NULL);
         CHECK(strstr(text, "PER-SESSION STATISTICS") != NULL);
+        CHECK(strstr(text, "PER-DATASET STATISTICS") != NULL);
         CHECK(strstr(text, "Session: Stats test") != NULL);
+        CHECK(strstr(text, "Dataset: Stats test") != NULL);
         CHECK(strstr(text, "ALL SELECTED DATA") != NULL);
         CHECK(strstr(text, "Round: Stats test / session 1 / round r1") !=
               NULL);
@@ -5749,10 +5838,11 @@ static void test_fcstats(void)
         {
             const char *rd = strstr(text, "PER-ROUND STATISTICS");
             const char *se = strstr(text, "PER-SESSION STATISTICS");
+            const char *dsb = strstr(text, "PER-DATASET STATISTICS");
             const char *allb = strstr(text, "ALL SELECTED DATA");
 
-            CHECK(rd != NULL && se != NULL && allb != NULL);
-            CHECK(rd < se && se < allb);
+            CHECK(rd != NULL && se != NULL && dsb != NULL && allb != NULL);
+            CHECK(rd < se && se < dsb && dsb < allb);
         }
         CHECK(strstr(text, "measurements: 9") != NULL);
         CHECK(strstr(text, "mean              5.000000") != NULL);
@@ -5828,6 +5918,8 @@ static void test_fcstats(void)
                                "round r1") != NULL);
             CHECK(strstr(text, "Round: Two-round dataset / session 1 / "
                                "round r2") != NULL);
+            CHECK(strstr(text, "Dataset: Single-round dataset") != NULL);
+            CHECK(strstr(text, "Dataset: Two-round dataset") != NULL);
             /* each session block has its own descriptive statistics */
             CHECK(strstr(text, "10.500000") != NULL);   /* 10, 11 */
             CHECK(strstr(text, "21.500000") != NULL);   /* 20..23 */
@@ -6574,6 +6666,7 @@ int main(void)
     test_fc_hypothesis();
     test_fcstats();
     test_fc_selection_blocks();
+    test_fc_csv_export();
     test_rank_canonical();
     test_synth_matches();
     test_lte_hint();
