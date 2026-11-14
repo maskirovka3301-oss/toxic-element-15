@@ -546,7 +546,7 @@ char *fc_stats_report(const FcDatasetList *list, FclScope scope,
                 "%s)\n", mean, cluster_lo, cluster_hi,
             confidence_suffix(opt.confidence));
     buf_add(&b, "  population sd     %.6f\n", sqrt(sigma_b2 + sigma_w2));
-    if (rounds >= 2 && opt.per_round) {
+    if (rounds >= 1 && opt.per_round) {
         size_t dcount = 0;
 
         buf_add(&b, "\nRound means (per dataset, ordered as stored) and "
@@ -555,15 +555,18 @@ char *fc_stats_report(const FcDatasetList *list, FclScope scope,
                     "------\n");
         for (size_t d = 0; d < list->count; d++) {
             const FcDataset *ds = &list->items[d];
-            double *means;
-            size_t rn = 0, idx = 0;
+            double means[256];
+            size_t rn = 0, idx = 0, valid = 0;
+            size_t total_meas = 0;
 
             for (size_t s = 0; s < ds->n_sessions; s++) {
                 rn += ds->sessions[s].n_rounds;
             }
-            if (rn < 2) continue;
-            means = malloc(rn * sizeof(*means));
-            if (means == NULL) continue;
+            if (rn == 0) {
+                buf_add(&b, "  %-32s no rounds in the selection\n",
+                        ds->title != NULL ? ds->title : ds->dataset_id);
+                continue;
+            }
             for (size_t s = 0; s < ds->n_sessions; s++) {
                 const FcSession *ss = &ds->sessions[s];
 
@@ -578,24 +581,46 @@ char *fc_stats_report(const FcDatasetList *list, FclScope scope,
                             cnt++;
                         }
                     }
-                    means[idx++] = cnt > 0 ? sum / (double)cnt : 0.0;
+                    total_meas += cnt;
+                    if (cnt > 0 && idx < sizeof(means) / sizeof(means[0])) {
+                        means[idx++] = sum / (double)cnt;
+                        valid++;
+                    }
                 }
             }
-            if (rn > 0) {
-                double mn = mean_of(means, rn);
-                double m2 = var_of(means, rn, mn);
-                double adev = allan_deviation(means, rn);
+            if (valid == 0) {
+                buf_add(&b, "  %-32s rounds %2zu  no measurements in the "
+                            "selected rounds\n",
+                        ds->title != NULL ? ds->title : ds->dataset_id, rn);
+                dcount++;
+                continue;
+            }
+            {
+                double mn = mean_of(means, idx);
+                double m2 = var_of(means, idx, mn);
 
-                buf_add(&b, "  %-32s rounds %2zu  mean %.6f  sd %.6f  "
-                            "ADEV(tau=1 round) %.6f\n",
-                        ds->title != NULL ? ds->title : ds->dataset_id, rn,
-                        mn, sqrt(m2), adev);
+                /* Allan deviation needs at least two round means; shorter
+                 * selections are still listed so every dataset with
+                 * selected rounds appears in the report */
+                if (valid >= 2) {
+                    double adev = allan_deviation(means, idx);
+
+                    buf_add(&b, "  %-32s rounds %2zu  mean %.6f  sd %.6f  "
+                                "ADEV(tau=1 round) %.6f\n",
+                            ds->title != NULL ? ds->title : ds->dataset_id,
+                            rn, mn, sqrt(m2), adev);
+                } else {
+                    buf_add(&b, "  %-32s rounds %2zu  mean %.6f  sd n/a  "
+                                "ADEV(tau=1 round) n/a (needs >= 2 rounds)\n",
+                            ds->title != NULL ? ds->title : ds->dataset_id,
+                            rn, mn);
+                }
+                (void)total_meas;
                 dcount++;
             }
-            free(means);
         }
         if (dcount == 0) {
-            buf_add(&b, "  (no dataset with at least two rounds)\n");
+            buf_add(&b, "  (no dataset has selected rounds)\n");
         }
     }
     buf_add(&b, "\nNotes\n");

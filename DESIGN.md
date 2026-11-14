@@ -310,8 +310,10 @@ copy) and shows — and can save — a text report with:
   effect, effective sample size, the population mean with a cluster
   bootstrap interval (whole lists resampled) and the population standard
   deviation;
-* per-dataset round means with the Allan deviation of the round means
-  (stability over one round), when a dataset has at least two rounds.
+* per-dataset round means for every dataset that has selected rounds
+  (ordered as stored), with the Allan deviation of the round means
+  (stability over one round) when at least two rounds contribute; a
+  single-round dataset is still listed, with "n/a (needs >= 2 rounds)".
 
 The report is rendered in `fcstats.c` (`fc_stats_report()`), which only
 reads the dataset list, so the same computation is testable without GTK.

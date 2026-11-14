@@ -5758,6 +5758,56 @@ static void test_fcstats(void)
               strstr(text, "merged") != NULL);
         free(text);
     }
+    /* every dataset with selected rounds is listed; a single-round dataset
+     * is shown with n/a instead of the Allan deviation */
+    {
+        static const char *p1 = "/tmp/te15_stats_one.json";
+        static const char *p2 = "/tmp/te15_stats_two.json";
+        static const char *one =
+            "{ \"dataset_id\": \"one\", \"source_file\": \"o.csv\", "
+            "\"title\": \"Single-round dataset\", \"notes\": [], "
+            "\"sessions\": [ { \"session_id\": 1, \"rounds\": [ { "
+            "\"round_id\": \"r1\", \"location\": null, \"date\": null, "
+            "\"coordinates\": null, \"closest_towers_enb_ids\": null, "
+            "\"context\": null, \"subjects_listed\": [], \"subjects\": [ "
+            "{\"name\": \"a\", \"measurements\": [10.0, 11.0]} ] } ] } ] }";
+        static const char *two =
+            "{ \"dataset_id\": \"two\", \"source_file\": \"t.csv\", "
+            "\"title\": \"Two-round dataset\", \"notes\": [], "
+            "\"sessions\": [ { \"session_id\": 1, \"rounds\": [ { "
+            "\"round_id\": \"r1\", \"location\": null, \"date\": null, "
+            "\"coordinates\": null, \"closest_towers_enb_ids\": null, "
+            "\"context\": null, \"subjects_listed\": [], \"subjects\": [ "
+            "{\"name\": \"a\", \"measurements\": [20.0, 21.0]} ] }, { "
+            "\"round_id\": \"r2\", \"location\": null, \"date\": null, "
+            "\"coordinates\": null, \"closest_towers_enb_ids\": null, "
+            "\"context\": null, \"subjects_listed\": [], \"subjects\": [ "
+            "{\"name\": \"b\", \"measurements\": [22.0, 23.0]} ] } ] } ] }";
+        FcDatasetList multi;
+
+        f = fopen(p1, "w");
+        CHECK(f != NULL);
+        if (f != NULL) { fputs(one, f); fclose(f); }
+        f = fopen(p2, "w");
+        CHECK(f != NULL);
+        if (f != NULL) { fputs(two, f); fclose(f); }
+        fcd_list_init(&multi);
+        CHECK(fcd_load_file(&multi, p1, NULL, 0));
+        CHECK(fcd_load_file(&multi, p2, NULL, 0));
+        opt.per_round = true;
+        text = fc_stats_report(&multi, FCL_SCOPE_PER_DATASET, &opt);
+        CHECK(text != NULL);
+        if (text != NULL) {
+            CHECK(strstr(text, "Single-round dataset") != NULL);
+            CHECK(strstr(text, "Two-round dataset") != NULL);
+            CHECK(strstr(text, "n/a (needs >= 2 rounds)") != NULL);
+            free(text);
+        }
+        fcd_list_clear(&multi);
+        remove(p1);
+        remove(p2);
+    }
+
     text = fc_stats_report(NULL, FCL_SCOPE_PER_DATASET, NULL);
     CHECK(text != NULL && strstr(text, "No datasets loaded") != NULL);
     free(text);
