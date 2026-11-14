@@ -201,13 +201,18 @@ case):
 * **Dataset / session / round / frequency-list selection**: every dataset
   root row, session row, round row and frequency-list (subject) row in the
   tree has a checkbox before the expander arrow (all checked when data is
-  added). A session box switches all frequency lists of its rounds, a round
-  box switches all frequency lists of that round, and a frequency-list box
-  switches just that list; parent rows show whether everything below them
-  is checked. The Analyze run copies only the checked datasets, rounds and
-  frequency lists into the worker snapshot (`fcd_remove_subject()` /
-  `fcd_remove_round()` drop unchecked entries), so unchecked data is left
-  out of the DAG; the Settings "Analysis scope" radio
+  added). Each row has its own explicit flag: a session box switches all
+  rounds and frequency lists below it, a round box switches all frequency
+  lists of that round, and a frequency-list box switches just that list.
+  Unchecking a child row never unchecks an ancestor (the ancestor's own
+  flag only changes when its box is clicked). Deselecting a parent
+  deselects all of its children and remembers their selection
+  (`fc_hist_*` masks); re-selecting the parent restores exactly the children
+  that were selected before it was deselected. The Analyze/Statistics runs
+  copy only the checked datasets, sessions, rounds and frequency lists into
+  the worker snapshot, removing the unchecked entries in index-safe order
+  (lists first, then rounds, then sessions, then whole datasets), so no
+  analysis ever sees measurements of an unchecked frequency list; the Settings "Analysis scope" radio
   reads "Analyze selected datasets separately" (per checked dataset) or
   merges the checked datasets into one list.
 * **Multiple testing**: Benjamini-Hochberg and Bonferroni correction per
@@ -261,6 +266,34 @@ no subcarrier clustering was found, the mixture fit when no
 induced-lattice clustering was detected, the CF slope when the K=1
 residual dispersion cannot serve as a single-subcarrier reference, and the
 MDL node always (no signal data).
+
+### Statistics tab
+
+The Frequency Counter notebook has a Statistics tab, separate from the
+analysis DAG. "Compute statistics" runs over the checked datasets, rounds
+and frequency lists (the same selection as the analysis, via the snapshot
+copy) and shows — and can save — a text report with:
+
+* descriptive statistics (n, mean, standard error, standard deviation,
+  minimum, Q1, median, Q3, maximum, IQR, scaled MAD, 10 % trimmed mean,
+  skewness, excess kurtosis);
+* a normality diagnostic (Jarque-Bera test, chi-square df = 2, with the
+  skewness/kurtosis interpretation);
+* percentile bootstrap confidence intervals (90/95/99 % selectable, 1000
+  replicates, deterministic RNG) for the mean, median, standard deviation
+  and trimmed mean;
+* population estimates from a two-level model with frequency lists as
+  clusters: between-list and within-list variance components, ICC, design
+  effect, effective sample size, the population mean with a cluster
+  bootstrap interval (whole lists resampled) and the population standard
+  deviation;
+* per-dataset round means with the Allan deviation of the round means
+  (stability over one round), when a dataset has at least two rounds.
+
+The report is rendered in `fcstats.c` (`fc_stats_report()`), which only
+reads the dataset list, so the same computation is testable without GTK.
+The "Save statistics" button writes the report to a file like the analysis
+report.
 
 ### Reconstructed subcarriers per round
 

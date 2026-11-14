@@ -38,6 +38,7 @@ APP_SRC := \
 	src/fcdataset.c \
 	src/fcdrift.c \
 	src/fclattice.c \
+	src/fcstats.c \
 	src/fclk.c \
 	src/dagcore.c \
 	src/dag.c \
@@ -89,6 +90,7 @@ TEST_SRC := \
 	src/fcdataset.c \
 	src/fcdrift.c \
 	src/fclattice.c \
+	src/fcstats.c \
 	src/fclk.c \
 	src/dagcore.c \
 	src/fcdag.c \

@@ -43,6 +43,7 @@
 #include "debug.h"
 #include "about_image.h"
 #include "fcdag.h"
+#include "fcstats.h"
 #include "fcreport.h"
 #include "fcdataset.h"
 #include "fit.h"
@@ -8132,23 +8133,53 @@ static bool fc_subject_is_selected(const Ui *ui, int di, int si, int ri,
 
 /* All frequency lists of the round are checked (a round without lists is
  * treated as checked). */
-static bool fc_round_all_subjects(const Ui *ui, int di, int si, int ri)
-{
-    if (di < 0 || si < 0 || ri < 0 || (size_t)di >= ui->fc_datasets.count) {
-        return false;
-    }
-    {
-        const FcDataset *ds = &ui->fc_datasets.items[di];
+/* ---- per-session "analyze" flags (flat dataset -> session order) -------- */
 
-        if ((size_t)si >= ds->n_sessions) return false;
-        if ((size_t)ri >= ds->sessions[si].n_rounds) return false;
-        for (size_t j = 0; j < ds->sessions[si].rounds[ri].n_subjects; j++) {
-            if (!fc_subject_is_selected(ui, di, si, ri, (int)j)) {
-                return false;
-            }
+static size_t fc_sessions_total(const Ui *ui)
+{
+    return fcd_list_count_sessions(&ui->fc_datasets);
+}
+
+static bool fc_session_flags_ensure(Ui *ui)
+{
+    size_t total = fc_sessions_total(ui);
+
+    if (total <= ui->fc_session_flags_capacity) return true;
+    {
+        size_t cap = total * 2;
+        bool *n = realloc(ui->fc_session_analyze, cap * sizeof(*n));
+
+        if (n == NULL) return false;
+        for (size_t i = ui->fc_session_flags_capacity; i < cap; i++) {
+            n[i] = true;
         }
+        ui->fc_session_analyze = n;
+        ui->fc_session_flags_capacity = cap;
     }
     return true;
+}
+
+static long fc_session_flat(const Ui *ui, int di, int si)
+{
+    long flat = 0;
+
+    if (di < 0 || si < 0 || (size_t)di >= ui->fc_datasets.count) return -1;
+    for (int d = 0; d < di; d++) {
+        flat += (long)ui->fc_datasets.items[d].n_sessions;
+    }
+    if ((size_t)si >= ui->fc_datasets.items[di].n_sessions) return -1;
+    flat += si;
+    return flat;
+}
+
+static bool fc_session_is_selected(const Ui *ui, int di, int si)
+{
+    long flat = fc_session_flat(ui, di, si);
+
+    if (flat < 0 || (size_t)flat >= ui->fc_session_flags_capacity) {
+        return true;
+    }
+    return ui->fc_session_analyze[flat];
 }
 
 /* ---- per-round "analyze" flags (flat dataset/session/round order) ------ */
@@ -8213,20 +8244,6 @@ static bool fc_round_is_selected(const Ui *ui, int di, int si, int ri)
 }
 
 /* True when every round of the session is checked for analysis. */
-static bool fc_session_all_selected(const Ui *ui, int di, int si)
-{
-    if (di < 0 || si < 0 || (size_t)di >= ui->fc_datasets.count) return false;
-    {
-        const FcDataset *ds = &ui->fc_datasets.items[di];
-
-        if ((size_t)si >= ds->n_sessions) return false;
-        for (size_t r = 0; r < ds->sessions[si].n_rounds; r++) {
-            if (!fc_round_is_selected(ui, di, si, (int)r)) return false;
-        }
-    }
-    return true;
-}
-
 /* Flat flag index of (dataset, session, round); -1 when out of range. */
 
 static void fc_tree_append(Ui *ui, GtkTreeIter *it, GtkTreeIter *parent,
@@ -8243,37 +8260,295 @@ static void fc_tree_append(Ui *ui, GtkTreeIter *it, GtkTreeIter *parent,
                        (kind == FC_KIND_DATASET && di >= 0 &&
                         di < FC_MAX_DATASETS &&
                         ui->fc_dataset_analyze[di]) ||
-                           (kind == FC_KIND_ROUND &&
-                            fc_round_all_subjects(ui, di, si, ri)) ||
-                           (kind == FC_KIND_SUBJECT &&
-                            fc_subject_is_selected(ui, di, si, ri, ji)) ||
                            (kind == FC_KIND_SESSION &&
-                            fc_session_all_selected(ui, di, si)), -1);
+                            fc_session_is_selected(ui, di, si)) ||
+                           (kind == FC_KIND_ROUND &&
+                            fc_round_is_selected(ui, di, si, ri)) ||
+                           (kind == FC_KIND_SUBJECT &&
+                            fc_subject_is_selected(ui, di, si, ri, ji)), -1);
 }
 
-/* Per-dataset "analyze" checkbox: toggling it marks the dataset included
- * or excluded from the next Analyze run. */
-/* Keep the round-level flag array in sync with the frequency-list flags. */
-static bool fc_sync_round_flag(Ui *ui, int di, int si, int ri)
-{
-    bool all = fc_round_all_subjects(ui, di, si, ri);
-    long flat = fc_round_flat(ui, di, si, ri);
+/* ---- saved child selections (parent checkbox history) ------------------ */
 
-    if (flat >= 0 && (size_t)flat < ui->fc_round_flags_capacity) {
-        ui->fc_round_analyze[flat] = all;
+typedef struct {
+    int    kind;   /* FC_KIND_DATASET / FC_KIND_SESSION / FC_KIND_ROUND */
+    int    di, si, ri;
+    bool  *mask;   /* descendant flags, canonical order (see below) */
+    size_t n;
+} FcHistEntry;
+
+static void fc_hist_clear(Ui *ui)
+{
+    FcHistEntry *h = (FcHistEntry *)ui->fc_hist;
+
+    for (size_t i = 0; i < ui->fc_hist_count; i++) free(h[i].mask);
+    free(h);
+    ui->fc_hist = NULL;
+    ui->fc_hist_count = 0;
+    ui->fc_hist_cap = 0;
+}
+
+static FcHistEntry *fc_hist_find(Ui *ui, int kind, int di, int si, int ri)
+{
+    FcHistEntry *h = (FcHistEntry *)ui->fc_hist;
+
+    for (size_t i = 0; i < ui->fc_hist_count; i++) {
+        if (h[i].kind == kind && h[i].di == di && h[i].si == si &&
+            h[i].ri == ri) {
+            return &h[i];
+        }
     }
-    return all;
+    return NULL;
 }
 
-/* Update the model row of a session from its rounds' current state. */
-static void fc_update_session_row(Ui *ui, GtkTreeIter *session_it, int di,
-                                  int si)
+/* Number of descendant flags a parent owns: children of the next level. */
+static size_t fc_desc_count(const Ui *ui, int kind, int di, int si, int ri)
 {
-    gtk_tree_store_set(ui->fc_model, session_it, FC_T_ANALYZE,
-                       fc_session_all_selected(ui, di, si), -1);
+    size_t n = 0;
+
+    if (di < 0 || (size_t)di >= ui->fc_datasets.count) return 0;
+    {
+        const FcDataset *ds = &ui->fc_datasets.items[di];
+
+        if (kind == FC_KIND_DATASET) {
+            for (size_t s = 0; s < ds->n_sessions; s++) {
+                const FcSession *ss = &ds->sessions[s];
+
+                n += 1;   /* the session flag */
+                for (size_t r = 0; r < ss->n_rounds; r++) {
+                    n += 1;
+                    n += ss->rounds[r].n_subjects;
+                }
+            }
+            return n;
+        }
+        if (si < 0 || (size_t)si >= ds->n_sessions) return 0;
+        {
+            const FcSession *ss = &ds->sessions[si];
+
+            if (kind == FC_KIND_SESSION) {
+                for (size_t r = 0; r < ss->n_rounds; r++) {
+                    n += 1;
+                    n += ss->rounds[r].n_subjects;
+                }
+                return n;
+            }
+            if (ri < 0 || (size_t)ri >= ss->n_rounds) return 0;
+            return ss->rounds[ri].n_subjects;
+        }
+    }
 }
 
-/* Show the "analyze" checkbox only on dataset and round rows. */
+/* Capture the descendant flags of a parent in canonical order. */
+static bool *fc_desc_capture(const Ui *ui, int kind, int di, int si, int ri,
+                             size_t *n_out)
+{
+    size_t n = fc_desc_count(ui, kind, di, si, ri);
+    bool *mask = malloc((n > 0 ? n : 1) * sizeof(*mask));
+    size_t k = 0;
+
+    if (mask == NULL) return NULL;
+    if (di < 0 || (size_t)di >= ui->fc_datasets.count) {
+        *n_out = 0;
+        return mask;
+    }
+    {
+        const FcDataset *ds = &ui->fc_datasets.items[di];
+
+        for (size_t s = 0; s < ds->n_sessions; s++) {
+            const FcSession *ss = &ds->sessions[s];
+
+            if (kind == FC_KIND_DATASET) {
+                long sf = fc_session_flat(ui, di, (int)s);
+
+                mask[k++] = (sf >= 0 &&
+                             (size_t)sf < ui->fc_session_flags_capacity)
+                                ? ui->fc_session_analyze[sf] : true;
+            }
+            if (kind == FC_KIND_DATASET || (int)s == si) {
+                for (size_t r = 0; r < ss->n_rounds; r++) {
+                    long rf;
+
+                    if (kind == FC_KIND_ROUND && (int)r != ri) continue;
+                    if (kind != FC_KIND_ROUND) {
+                        rf = fc_round_flat(ui, di, (int)s, (int)r);
+                        mask[k++] =
+                            (rf >= 0 &&
+                             (size_t)rf < ui->fc_round_flags_capacity)
+                                ? ui->fc_round_analyze[rf] : true;
+                    }
+                    for (size_t j = 0; j < ss->rounds[r].n_subjects; j++) {
+                        long jf = fc_subject_flat(ui, di, (int)s, (int)r,
+                                                  (int)j);
+
+                        mask[k++] =
+                            (jf >= 0 &&
+                             (size_t)jf < ui->fc_subject_flags_capacity)
+                                ? ui->fc_subject_analyze[jf] : true;
+                    }
+                }
+            }
+        }
+    }
+    *n_out = k;
+    return mask;
+}
+
+/* Apply a saved mask (or a constant value when mask == NULL) to the
+ * descendants of a parent, in the same canonical order. */
+static void fc_desc_apply(Ui *ui, int kind, int di, int si, int ri,
+                          const bool *mask, size_t n, bool value)
+{
+    size_t k = 0;
+
+    if (di < 0 || (size_t)di >= ui->fc_datasets.count) return;
+    {
+        FcDataset *ds = &ui->fc_datasets.items[di];
+
+        for (size_t s = 0; s < ds->n_sessions; s++) {
+            FcSession *ss = &ds->sessions[s];
+
+            if (kind == FC_KIND_DATASET) {
+                long sf = fc_session_flat(ui, di, (int)s);
+
+                if (sf >= 0 &&
+                    (size_t)sf < ui->fc_session_flags_capacity) {
+                    ui->fc_session_analyze[sf] =
+                        mask != NULL && k < n ? mask[k] : value;
+                }
+                if (mask != NULL) k++;
+            }
+            if (kind == FC_KIND_DATASET || (int)s == si) {
+                for (size_t r = 0; r < ss->n_rounds; r++) {
+                    long rf;
+
+                    if (kind == FC_KIND_ROUND && (int)r != ri) continue;
+                    if (kind != FC_KIND_ROUND) {
+                        rf = fc_round_flat(ui, di, (int)s, (int)r);
+                        if (rf >= 0 &&
+                            (size_t)rf < ui->fc_round_flags_capacity) {
+                            ui->fc_round_analyze[rf] =
+                                mask != NULL && k < n ? mask[k] : value;
+                        }
+                        if (mask != NULL) k++;
+                    }
+                    for (size_t j = 0; j < ss->rounds[r].n_subjects; j++) {
+                        long jf = fc_subject_flat(ui, di, (int)s, (int)r,
+                                                  (int)j);
+
+                        if (jf >= 0 &&
+                            (size_t)jf < ui->fc_subject_flags_capacity) {
+                            ui->fc_subject_analyze[jf] =
+                                mask != NULL && k < n ? mask[k] : value;
+                        }
+                        if (mask != NULL) k++;
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void fc_hist_save(Ui *ui, int kind, int di, int si, int ri)
+{
+    FcHistEntry *e = fc_hist_find(ui, kind, di, si, ri);
+    bool *mask;
+    size_t n = 0;
+
+    mask = fc_desc_capture(ui, kind, di, si, ri, &n);
+    if (mask == NULL) return;
+    if (e != NULL) {
+        free(e->mask);
+        e->mask = mask;
+        e->n = n;
+        return;
+    }
+    if (ui->fc_hist_count == ui->fc_hist_cap) {
+        size_t cap = ui->fc_hist_cap == 0 ? 8 : ui->fc_hist_cap * 2;
+        FcHistEntry *nh = realloc(ui->fc_hist, cap * sizeof(*nh));
+
+        if (nh == NULL) {
+            free(mask);
+            return;
+        }
+        ui->fc_hist = nh;
+        ui->fc_hist_cap = cap;
+    }
+    ((FcHistEntry *)ui->fc_hist)[ui->fc_hist_count].kind = kind;
+    ((FcHistEntry *)ui->fc_hist)[ui->fc_hist_count].di = di;
+    ((FcHistEntry *)ui->fc_hist)[ui->fc_hist_count].si = si;
+    ((FcHistEntry *)ui->fc_hist)[ui->fc_hist_count].ri = ri;
+    ((FcHistEntry *)ui->fc_hist)[ui->fc_hist_count].mask = mask;
+    ((FcHistEntry *)ui->fc_hist)[ui->fc_hist_count].n = n;
+    ui->fc_hist_count++;
+}
+
+/* Detach the saved mask for a parent (NULL when there is none). */
+static bool *fc_hist_take(Ui *ui, int kind, int di, int si, int ri,
+                          size_t *n_out)
+{
+    FcHistEntry *h = (FcHistEntry *)ui->fc_hist;
+    FcHistEntry *e = fc_hist_find(ui, kind, di, si, ri);
+    bool *mask;
+    size_t idx;
+
+    *n_out = 0;
+    if (e == NULL) return NULL;
+    idx = (size_t)(e - h);
+    mask = e->mask;
+    *n_out = e->n;
+    if (idx + 1 < ui->fc_hist_count) {
+        h[idx] = h[ui->fc_hist_count - 1];
+    }
+    ui->fc_hist_count--;
+    return mask;
+}
+
+/* Refresh the checkbox state of a subtree from the current flags. */
+static void fc_refresh_tree_flags(Ui *ui, GtkTreeIter *it)
+{
+    int kind = -1, di = -1, si = -1, ri = -1, ji = -1;
+    GtkTreeModel *model = GTK_TREE_MODEL(ui->fc_model);
+
+    gtk_tree_model_get(model, it, FC_T_KIND, &kind, FC_T_DATASET, &di,
+                       FC_T_SESSION, &si, FC_T_ROUND, &ri, FC_T_SUBJECT, &ji,
+                       -1);
+    switch (kind) {
+    case FC_KIND_DATASET:
+        if (di >= 0 && di < FC_MAX_DATASETS) {
+            gtk_tree_store_set(ui->fc_model, it, FC_T_ANALYZE,
+                               ui->fc_dataset_analyze[di], -1);
+        }
+        break;
+    case FC_KIND_SESSION:
+        gtk_tree_store_set(ui->fc_model, it, FC_T_ANALYZE,
+                           fc_session_is_selected(ui, di, si), -1);
+        break;
+    case FC_KIND_ROUND:
+        gtk_tree_store_set(ui->fc_model, it, FC_T_ANALYZE,
+                           fc_round_is_selected(ui, di, si, ri), -1);
+        break;
+    case FC_KIND_SUBJECT:
+        gtk_tree_store_set(ui->fc_model, it, FC_T_ANALYZE,
+                           fc_subject_is_selected(ui, di, si, ri, ji), -1);
+        break;
+    default:
+        break;
+    }
+    {
+        GtkTreeIter child;
+        int n = gtk_tree_model_iter_n_children(model, it);
+
+        for (int c = 0; c < n; c++) {
+            if (gtk_tree_model_iter_nth_child(model, &child, it, c)) {
+                fc_refresh_tree_flags(ui, &child);
+            }
+        }
+    }
+}
+
+/* Show the "analyze" checkbox on dataset, session, round and frequency-list
+ * rows only. */
 static void fc_analyze_cell_data(GtkTreeViewColumn *column,
                                  GtkCellRenderer *cell, GtkTreeModel *model,
                                  GtkTreeIter *iter, gpointer user_data)
@@ -8313,150 +8588,108 @@ static gboolean on_fc_dataset_toggled(GtkCellRendererToggle *renderer,
     active = active ? FALSE : TRUE;
     if (kind == FC_KIND_DATASET) {
         if (di < 0 || di >= FC_MAX_DATASETS) return FALSE;
+        fc_session_flags_ensure(ui);
+        fc_round_flags_ensure(ui);
+        fc_subject_flags_ensure(ui);
+        active = ui->fc_dataset_analyze[di] ? FALSE : TRUE;
         ui->fc_dataset_analyze[di] = active != FALSE;
-        gtk_tree_store_set(ui->fc_model, &it, FC_T_ANALYZE, active, -1);
-    } else if (kind == FC_KIND_SESSION) {
-        /* a session checkbox stands for all of its rounds: clicking it
-         * checks or unchecks every round of that session */
-        const FcDataset *ds;
-        size_t n_rounds;
+        if (!active) {
+            /* deselecting a parent deselects all its children; the current
+             * child selection is remembered for the next reselect */
+            fc_hist_save(ui, FC_KIND_DATASET, di, 0, 0);
+            fc_desc_apply(ui, FC_KIND_DATASET, di, 0, 0, NULL, 0, false);
+        } else {
+            size_t n = 0;
+            bool *mask = fc_hist_take(ui, FC_KIND_DATASET, di, 0, 0, &n);
 
+            fc_desc_apply(ui, FC_KIND_DATASET, di, 0, 0, mask, n, true);
+            free(mask);
+        }
+        fc_refresh_tree_flags(ui, &it);
+    } else if (kind == FC_KIND_SESSION) {
         if (di < 0 || si < 0 || (size_t)di >= ui->fc_datasets.count) {
             return FALSE;
         }
-        ds = &ui->fc_datasets.items[di];
-        if ((size_t)si >= ds->n_sessions) return FALSE;
-        n_rounds = ds->sessions[si].n_rounds;
+        if ((size_t)si >= ui->fc_datasets.items[di].n_sessions) return FALSE;
+        fc_session_flags_ensure(ui);
         fc_round_flags_ensure(ui);
         fc_subject_flags_ensure(ui);
-        active = fc_session_all_selected(ui, di, si) ? FALSE : TRUE;
-        for (size_t r = 0; r < n_rounds; r++) {
-            const FcRound *rr = &ds->sessions[si].rounds[r];
-            long flat = fc_round_flat(ui, di, si, (int)r);
+        active = fc_session_is_selected(ui, di, si) ? FALSE : TRUE;
+        {
+            long flat = fc_session_flat(ui, di, si);
+
+            if (flat >= 0 &&
+                (size_t)flat < ui->fc_session_flags_capacity) {
+                ui->fc_session_analyze[flat] = active != FALSE;
+            }
+        }
+        if (!active) {
+            fc_hist_save(ui, FC_KIND_SESSION, di, si, -1);
+            fc_desc_apply(ui, FC_KIND_SESSION, di, si, -1, NULL, 0, false);
+        } else {
+            size_t n = 0;
+            bool *mask = fc_hist_take(ui, FC_KIND_SESSION, di, si, -1, &n);
+
+            fc_desc_apply(ui, FC_KIND_SESSION, di, si, -1, mask, n, true);
+            free(mask);
+        }
+        fc_refresh_tree_flags(ui, &it);
+    } else if (kind == FC_KIND_ROUND) {
+        if (di < 0 || si < 0 || ri < 0 ||
+            (size_t)di >= ui->fc_datasets.count) {
+            return FALSE;
+        }
+        if ((size_t)si >= ui->fc_datasets.items[di].n_sessions) return FALSE;
+        if ((size_t)ri >=
+            ui->fc_datasets.items[di].sessions[si].n_rounds) return FALSE;
+        fc_round_flags_ensure(ui);
+        fc_subject_flags_ensure(ui);
+        active = fc_round_is_selected(ui, di, si, ri) ? FALSE : TRUE;
+        {
+            long flat = fc_round_flat(ui, di, si, ri);
 
             if (flat >= 0 && (size_t)flat < ui->fc_round_flags_capacity) {
                 ui->fc_round_analyze[flat] = active != FALSE;
             }
-            for (size_t j = 0; j < rr->n_subjects; j++) {
-                long sf = fc_subject_flat(ui, di, si, (int)r, (int)j);
-
-                if (sf >= 0 &&
-                    (size_t)sf < ui->fc_subject_flags_capacity) {
-                    ui->fc_subject_analyze[sf] = active != FALSE;
-                }
-            }
         }
-        gtk_tree_store_set(ui->fc_model, &it, FC_T_ANALYZE, active, -1);
-        {
-            GtkTreeIter child;
-            int n = gtk_tree_model_iter_n_children(
-                GTK_TREE_MODEL(ui->fc_model), &it);
+        if (!active) {
+            fc_hist_save(ui, FC_KIND_ROUND, di, si, ri);
+            fc_desc_apply(ui, FC_KIND_ROUND, di, si, ri, NULL, 0, false);
+        } else {
+            size_t n = 0;
+            bool *mask = fc_hist_take(ui, FC_KIND_ROUND, di, si, ri, &n);
 
-            for (int k = 0; k < n; k++) {
-                if (gtk_tree_model_iter_nth_child(GTK_TREE_MODEL(
-                                                      ui->fc_model),
-                                                  &child, &it, k)) {
-                    gtk_tree_store_set(ui->fc_model, &child, FC_T_ANALYZE,
-                                       active, -1);
-                }
-            }
+            fc_desc_apply(ui, FC_KIND_ROUND, di, si, ri, mask, n, true);
+            free(mask);
         }
-    } else if (kind == FC_KIND_ROUND) {
-        const FcDataset *ds;
-        size_t n_lists;
-
-        if (di < 0 || si < 0 || ri < 0 || (size_t)di >= ui->fc_datasets.count) {
-            return FALSE;
-        }
-        ds = &ui->fc_datasets.items[di];
-        if ((size_t)si >= ds->n_sessions) return FALSE;
-        if ((size_t)ri >= ds->sessions[si].n_rounds) return FALSE;
-        n_lists = ds->sessions[si].rounds[ri].n_subjects;
-        fc_subject_flags_ensure(ui);
-        active = fc_round_all_subjects(ui, di, si, ri) ? FALSE : TRUE;
-        for (size_t j = 0; j < n_lists; j++) {
-            long flat = fc_subject_flat(ui, di, si, ri, (int)j);
-
-            if (flat >= 0 && (size_t)flat < ui->fc_subject_flags_capacity) {
-                ui->fc_subject_analyze[flat] = active != FALSE;
-            }
-        }
-        fc_sync_round_flag(ui, di, si, ri);
-        gtk_tree_store_set(ui->fc_model, &it, FC_T_ANALYZE, active, -1);
-        {
-            GtkTreeIter child;
-            int n = gtk_tree_model_iter_n_children(
-                GTK_TREE_MODEL(ui->fc_model), &it);
-
-            for (int k = 0; k < n; k++) {
-                if (gtk_tree_model_iter_nth_child(GTK_TREE_MODEL(
-                                                      ui->fc_model),
-                                                  &child, &it, k)) {
-                    gtk_tree_store_set(ui->fc_model, &child, FC_T_ANALYZE,
-                                       active, -1);
-                }
-            }
-        }
-        {
-            GtkTreeIter parent;
-
-            if (gtk_tree_model_iter_parent(GTK_TREE_MODEL(ui->fc_model),
-                                           &parent, &it)) {
-                int pkind = -1, pdi = -1, psi = -1;
-
-                gtk_tree_model_get(GTK_TREE_MODEL(ui->fc_model), &parent,
-                                   FC_T_KIND, &pkind, FC_T_DATASET, &pdi,
-                                   FC_T_SESSION, &psi, -1);
-                if (pkind == FC_KIND_SESSION) {
-                    fc_update_session_row(ui, &parent, pdi, psi);
-                }
-            }
-        }
+        fc_refresh_tree_flags(ui, &it);
     } else if (kind == FC_KIND_SUBJECT) {
+        /* A frequency list is switched on its own: ancestors keep their
+         * own state (unchecking a child never unchecks an ancestor). */
         long flat = fc_subject_flat(ui, di, si, ri, ji);
-        GtkTreeIter parent;
 
         if (flat < 0 || (size_t)flat >= ui->fc_subject_flags_capacity) {
             return FALSE;
         }
+        active = ui->fc_subject_analyze[flat] ? FALSE : TRUE;
         ui->fc_subject_analyze[flat] = active != FALSE;
         gtk_tree_store_set(ui->fc_model, &it, FC_T_ANALYZE, active, -1);
-        /* update the owning round and session rows */
-        if (gtk_tree_model_iter_parent(GTK_TREE_MODEL(ui->fc_model), &parent,
-                                       &it)) {
-            bool round_all;
-
-            fc_sync_round_flag(ui, di, si, ri);
-            round_all = fc_round_all_subjects(ui, di, si, ri);
-            gtk_tree_store_set(ui->fc_model, &parent, FC_T_ANALYZE,
-                               round_all, -1);
-            {
-                GtkTreeIter session;
-
-                if (gtk_tree_model_iter_parent(GTK_TREE_MODEL(ui->fc_model),
-                                               &session, &parent)) {
-                    int pkind = -1, pdi = -1, psi = -1;
-
-                    gtk_tree_model_get(GTK_TREE_MODEL(ui->fc_model),
-                                       &session, FC_T_KIND, &pkind,
-                                       FC_T_DATASET, &pdi, FC_T_SESSION,
-                                       &psi, -1);
-                    if (pkind == FC_KIND_SESSION) {
-                        fc_update_session_row(ui, &session, pdi, psi);
-                    }
-                }
-            }
-        }
     } else {
         return FALSE;
     }
     if (ui->fc_status_label != NULL) {
-        size_t selected = 0, rounds = 0, rounds_total = 0;
+        size_t selected = 0, sessions = 0, sessions_total = 0;
+        size_t rounds = 0, rounds_total = 0;
         size_t lists = 0, lists_total = 0;
 
         for (size_t i = 0; i < ui->fc_datasets.count &&
                            i < FC_MAX_DATASETS; i++) {
             if (ui->fc_dataset_analyze[i]) selected++;
+        }
+        sessions_total = fc_sessions_total(ui);
+        for (size_t i = 0; i < sessions_total &&
+                           i < ui->fc_session_flags_capacity; i++) {
+            if (ui->fc_session_analyze[i]) sessions++;
         }
         rounds_total = fc_rounds_total(ui);
         for (size_t i = 0; i < rounds_total &&
@@ -8472,9 +8705,11 @@ static gboolean on_fc_dataset_toggled(GtkCellRendererToggle *renderer,
             char msg[384];
 
             snprintf(msg, sizeof(msg), "%zu of %zu dataset%s, %zu of %zu "
-                     "round%s and %zu of %zu frequency list%s selected for "
-                     "analysis.", selected, ui->fc_datasets.count,
-                     ui->fc_datasets.count == 1 ? "" : "s", rounds,
+                     "session%s, %zu of %zu round%s and %zu of %zu frequency "
+                     "list%s selected for analysis.", selected,
+                     ui->fc_datasets.count,
+                     ui->fc_datasets.count == 1 ? "" : "s", sessions,
+                     sessions_total, sessions_total == 1 ? "" : "s", rounds,
                      rounds_total, rounds_total == 1 ? "" : "s", lists,
                      lists_total, lists_total == 1 ? "" : "s");
             gtk_label_set_text(GTK_LABEL(ui->fc_status_label), msg);
@@ -8489,7 +8724,12 @@ static gboolean on_fc_dataset_toggled(GtkCellRendererToggle *renderer,
 static bool fc_analyze_snapshot(Ui *ui, FcDatasetList *out)
 {
     if (!fcd_list_clone(&ui->fc_datasets, out)) return false;
-    /* unchecked frequency lists (subjects) are removed first */
+    /* The clone keeps the original order, so the flag indices of the UI
+     * list are valid while entries are removed from the END of each level.
+     * Order matters: frequency lists are removed first (before rounds, so
+     * the round indices still match the original rounds), then rounds,
+     * then sessions, then whole datasets. Unchecked data is therefore never
+     * passed to the analyses. */
     for (size_t d = 0; d < ui->fc_datasets.count; d++) {
         const FcDataset *ds = &ui->fc_datasets.items[d];
 
@@ -8506,6 +8746,35 @@ static bool fc_analyze_snapshot(Ui *ui, FcDatasetList *out)
                                                 (int)ji)) {
                         fcd_remove_subject(&out->items[d], s, r, ji);
                     }
+                }
+            }
+        }
+    }
+    for (size_t d = 0; d < ui->fc_datasets.count; d++) {
+        const FcDataset *ds = &ui->fc_datasets.items[d];
+
+        for (size_t s = 0; s < ds->n_sessions; s++) {
+            size_t rn = ds->sessions[s].n_rounds;
+
+            for (size_t r = rn; r > 0; r--) {
+                size_t ri = r - 1;
+
+                if (!fc_round_is_selected(ui, (int)d, (int)s, (int)ri)) {
+                    fcd_remove_round(&out->items[d], s, ri);
+                }
+            }
+        }
+    }
+    for (size_t d = 0; d < ui->fc_datasets.count; d++) {
+        const FcDataset *ds = &ui->fc_datasets.items[d];
+
+        for (size_t s = 0; s < ds->n_sessions; s++) {
+            if (fc_session_is_selected(ui, (int)d, (int)s)) continue;
+            {
+                size_t rn = ds->sessions[s].n_rounds;
+
+                for (size_t r = rn; r > 0; r--) {
+                    fcd_remove_round(&out->items[d], s, r - 1);
                 }
             }
         }
@@ -8535,6 +8804,7 @@ static bool fc_analyze_snapshot(Ui *ui, FcDatasetList *out)
     return true;
 }
 
+
 /* Count the datasets whose checkbox is checked. */
 static size_t fc_analyze_selected(const Ui *ui)
 {
@@ -8549,6 +8819,7 @@ static size_t fc_analyze_selected(const Ui *ui)
 
 static void fc_tree_build(Ui *ui, const char *filter)
 {
+    fc_session_flags_ensure(ui);
     fc_round_flags_ensure(ui);
     fc_subject_flags_ensure(ui);
     gtk_tree_store_clear(ui->fc_model);
@@ -8772,6 +9043,8 @@ static void fc_load_paths(Ui *ui, char *const *paths, size_t n_paths)
             snprintf(last_err, sizeof(last_err), "%s", err);
         }
     }
+    fc_hist_clear(ui);
+    fc_session_flags_ensure(ui);
     fc_round_flags_ensure(ui);
     fc_subject_flags_ensure(ui);
     fc_rebuild(ui, false);
@@ -8913,8 +9186,10 @@ static void on_fc_remove_clicked(GtkButton *button, gpointer user_data)
     int kind, di = -1, si = -1, ri = -1, ji = -1;
     size_t old_total, removed_offset = 0, removed_count = 0;
     size_t old_subj_total = 0, subj_offset = 0, subj_count = 0;
+    size_t old_sess_total = 0, sess_offset = 0, sess_count = 0;
     bool *old_flags = NULL;
     bool *old_subj = NULL;
+    bool *old_sess = NULL;
 
     (void)button;
     if (!fc_selection(ui, &kind, &di, &si, &ri, &ji) || di < 0) return;
@@ -8949,6 +9224,19 @@ static void on_fc_remove_clicked(GtkButton *button, gpointer user_data)
             }
         }
     }
+    old_sess_total = fc_sessions_total(ui);
+    for (int d = 0; d < di && (size_t)d < ui->fc_datasets.count; d++) {
+        sess_offset += ui->fc_datasets.items[d].n_sessions;
+    }
+    sess_count = ui->fc_datasets.items[di].n_sessions;
+    if (old_sess_total > 0 && ui->fc_session_analyze != NULL) {
+        old_sess = malloc(old_sess_total * sizeof(*old_sess));
+        if (old_sess != NULL) {
+            memcpy(old_sess, ui->fc_session_analyze,
+                   old_sess_total * sizeof(*old_sess));
+        }
+    }
+    fc_hist_clear(ui);
     if (old_subj_total > 0 && ui->fc_subject_analyze != NULL) {
         old_subj = malloc(old_subj_total * sizeof(*old_subj));
         if (old_subj != NULL) {
@@ -9018,6 +9306,28 @@ static void on_fc_remove_clicked(GtkButton *button, gpointer user_data)
         }
         free(old_subj);
     }
+    if (old_sess != NULL) {
+        size_t new_total = old_sess_total > sess_count
+                               ? old_sess_total - sess_count : 0;
+        size_t cap = new_total * 2 + 1;
+        bool *nf = malloc(cap * sizeof(*nf));
+
+        if (nf != NULL) {
+            size_t out = 0;
+
+            for (size_t i = 0; i < old_sess_total; i++) {
+                if (i >= sess_offset && i < sess_offset + sess_count) {
+                    continue;
+                }
+                if (out < new_total) nf[out++] = old_sess[i];
+            }
+            while (out < cap) nf[out++] = true;
+            free(ui->fc_session_analyze);
+            ui->fc_session_analyze = nf;
+            ui->fc_session_flags_capacity = cap;
+        }
+        free(old_sess);
+    }
     fc_rebuild(ui, false);
     fc_show_details(ui);
     if (ui->fc_status_label != NULL) {
@@ -9035,6 +9345,13 @@ static void on_fc_remove_all_clicked(GtkButton *button, gpointer user_data)
 
     (void)button;
     fcd_list_clear(&ui->fc_datasets);
+    fc_hist_clear(ui);
+    free(ui->fc_session_analyze);
+    ui->fc_session_analyze = NULL;
+    ui->fc_session_flags_capacity = 0;
+    free(ui->fc_session_analyze);
+    ui->fc_session_analyze = NULL;
+    ui->fc_session_flags_capacity = 0;
     free(ui->fc_round_analyze);
     ui->fc_round_analyze = NULL;
     ui->fc_round_flags_capacity = 0;
@@ -9688,12 +10005,179 @@ static GtkWidget *build_fc_analysis_page(Ui *ui)
     return page;
 }
 
+/* ---- Statistics tab --------------------------------------------------- */
+
+static void on_fc_stats_clicked(GtkButton *button, gpointer user_data)
+{
+    Ui *ui = (Ui *)user_data;
+    FcDatasetList snap;
+    FcStatsOptions opt;
+    char *text;
+    int conf = 95;
+
+    (void)button;
+    if (ui->fc_stats_view == NULL) return;
+    if (ui->fc_datasets.count == 0) {
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
+                           "No datasets loaded: load measurement data first.");
+        return;
+    }
+    if (fc_analyze_selected(ui) == 0) {
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
+                           "No dataset is selected for analysis: check the "
+                           "tree checkboxes first.");
+        return;
+    }
+    fcd_list_init(&snap);
+    if (!fc_analyze_snapshot(ui, &snap)) {
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
+                           "Out of memory copying the datasets.");
+        return;
+    }
+    if (fcd_list_count_measurements(&snap) == 0) {
+        fcd_list_clear(&snap);
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
+                           "No measurements selected: check at least one "
+                           "frequency list in the tree.");
+        return;
+    }
+    if (ui->fc_stats_conf_combo != NULL) {
+        int idx = gtk_combo_box_get_active(GTK_COMBO_BOX(
+            ui->fc_stats_conf_combo));
+
+        conf = idx == 0 ? 90 : idx == 2 ? 99 : 95;
+    }
+    memset(&opt, 0, sizeof(opt));
+    opt.confidence = conf;
+    opt.bootstrap = 1000;
+    opt.per_round = true;
+    text = fc_stats_report(&snap, (FclScope)ui->fc_scope, &opt);
+    fcd_list_clear(&snap);
+    if (text == NULL) {
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
+                           "Out of memory computing the statistics.");
+        return;
+    }
+    free(ui->fc_stats_text);
+    ui->fc_stats_text = text;
+    {
+        GtkTextBuffer *buf = gtk_text_view_get_buffer(
+            GTK_TEXT_VIEW(ui->fc_stats_view));
+
+        gtk_text_buffer_set_text(buf, text, -1);
+    }
+    if (ui->fc_stats_save_btn != NULL) {
+        gtk_widget_set_sensitive(ui->fc_stats_save_btn, TRUE);
+    }
+    if (ui->fc_status_label != NULL) {
+        char msg[256];
+
+        snprintf(msg, sizeof(msg), "Statistics computed for %zu "
+                 "measurements.", fcd_list_count_measurements(
+                     &ui->fc_datasets));
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label), msg);
+    }
+}
+
+static void on_fc_stats_save_clicked(GtkButton *button, gpointer user_data)
+{
+    Ui *ui = (Ui *)user_data;
+    GtkWidget *dialog;
+
+    (void)button;
+    if (ui->fc_stats_text == NULL) return;
+    dialog = gtk_file_chooser_dialog_new(
+        "Save frequency-counter statistics", GTK_WINDOW(ui->window),
+        GTK_FILE_CHOOSER_ACTION_SAVE, "Cancel", GTK_RESPONSE_CANCEL, "Save",
+        GTK_RESPONSE_ACCEPT, NULL);
+    gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dialog),
+                                      "fc_statistics.txt");
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(
+            dialog));
+        FILE *f = filename != NULL ? fopen(filename, "wb") : NULL;
+
+        if (f != NULL) {
+            fwrite(ui->fc_stats_text, 1, strlen(ui->fc_stats_text), f);
+            fclose(f);
+        }
+        g_free(filename);
+    }
+    gtk_widget_destroy(dialog);
+}
+
+static GtkWidget *build_fc_statistics_page(Ui *ui)
+{
+    GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, PAGE_SPACING);
+    GtkWidget *toolbar = gtk_flow_box_new();
+    GtkWidget *scroll = gtk_scrolled_window_new(NULL, NULL);
+
+    gtk_widget_set_margin_start(page, PAGE_MARGIN);
+    gtk_widget_set_margin_end(page, PAGE_MARGIN);
+    gtk_widget_set_margin_top(page, PAGE_MARGIN);
+    gtk_widget_set_margin_bottom(page, PAGE_MARGIN);
+    gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(toolbar), GTK_SELECTION_NONE);
+    gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(toolbar), PAGE_SPACING);
+    ui->fc_stats_btn = gtk_button_new_with_label("Compute statistics");
+    gtk_widget_set_tooltip_text(ui->fc_stats_btn,
+                                "Descriptive, robust and bootstrap "
+                                "statistics plus population estimates over "
+                                "the checked datasets, rounds and frequency "
+                                "lists");
+    g_signal_connect(ui->fc_stats_btn, "clicked",
+                     G_CALLBACK(on_fc_stats_clicked), ui);
+    gtk_flow_box_insert(GTK_FLOW_BOX(toolbar), ui->fc_stats_btn, -1);
+    {
+        GtkWidget *lbl = gtk_label_new("Confidence:");
+
+        ui->fc_stats_conf_combo = gtk_combo_box_text_new();
+        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(
+                                           ui->fc_stats_conf_combo), "90%");
+        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(
+                                           ui->fc_stats_conf_combo), "95%");
+        gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(
+                                           ui->fc_stats_conf_combo), "99%");
+        gtk_combo_box_set_active(GTK_COMBO_BOX(ui->fc_stats_conf_combo), 1);
+        gtk_flow_box_insert(GTK_FLOW_BOX(toolbar), lbl, -1);
+        gtk_flow_box_insert(GTK_FLOW_BOX(toolbar),
+                            ui->fc_stats_conf_combo, -1);
+    }
+    ui->fc_stats_save_btn = gtk_button_new_with_label("Save statistics");
+    gtk_widget_set_sensitive(ui->fc_stats_save_btn, FALSE);
+    g_signal_connect(ui->fc_stats_save_btn, "clicked",
+                     G_CALLBACK(on_fc_stats_save_clicked), ui);
+    gtk_flow_box_insert(GTK_FLOW_BOX(toolbar), ui->fc_stats_save_btn, -1);
+    gtk_box_pack_start(GTK_BOX(page), toolbar, FALSE, FALSE, 0);
+    {
+        GtkWidget *hint = gtk_label_new(
+            "The statistics use the checked datasets, rounds and frequency "
+            "lists (the same selection as the analysis). Confidence "
+            "intervals are percentile bootstraps; the population estimates "
+            "use a two-level model with frequency lists as clusters "
+            "(cluster bootstrap, ICC, design effect, effective n).");
+        gtk_label_set_xalign(GTK_LABEL(hint), 0.0);
+        gtk_label_set_line_wrap(GTK_LABEL(hint), TRUE);
+        gtk_box_pack_start(GTK_BOX(page), hint, FALSE, FALSE, 0);
+    }
+    ui->fc_stats_view = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(ui->fc_stats_view), FALSE);
+    gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(ui->fc_stats_view),
+                                     FALSE);
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(ui->fc_stats_view),
+                                GTK_WRAP_WORD_CHAR);
+    gtk_text_view_set_monospace(GTK_TEXT_VIEW(ui->fc_stats_view), TRUE);
+    gtk_container_add(GTK_CONTAINER(scroll), ui->fc_stats_view);
+    gtk_box_pack_start(GTK_BOX(page), scroll, TRUE, TRUE, 0);
+    return page;
+}
+
 static GtkWidget *build_freq_counter_page(Ui *ui)
 {
     GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
     GtkWidget *left = build_fc_left_panel(ui);
     GtkWidget *right = gtk_notebook_new();
     GtkWidget *analysis_page;
+    GtkWidget *statistics_page;
     GtkWidget *settings_page;
 
     fcd_list_init(&ui->fc_datasets);
@@ -9705,6 +10189,9 @@ static GtkWidget *build_freq_counter_page(Ui *ui)
     analysis_page = build_fc_analysis_page(ui);
     gtk_notebook_append_page(GTK_NOTEBOOK(right), analysis_page,
                              gtk_label_new("Analysis"));
+    statistics_page = build_fc_statistics_page(ui);
+    gtk_notebook_append_page(GTK_NOTEBOOK(right), statistics_page,
+                             gtk_label_new("Statistics"));
     settings_page = build_fc_settings_page(ui);
     gtk_notebook_append_page(GTK_NOTEBOOK(right), settings_page,
                              gtk_label_new("Settings"));
@@ -10155,6 +10642,21 @@ void ui_cleanup(Ui *ui)
     ui->fc_report_text = NULL;
     ui->fc_report_markdown = NULL;
     ui->fc_report_html = NULL;
+    free(ui->fc_stats_text);
+    ui->fc_stats_text = NULL;
+    fc_hist_clear(ui);
+    free(ui->fc_session_analyze);
+    ui->fc_session_analyze = NULL;
+    ui->fc_session_flags_capacity = 0;
+    free(ui->fc_session_analyze);
+    ui->fc_session_analyze = NULL;
+    ui->fc_session_flags_capacity = 0;
+    free(ui->fc_round_analyze);
+    ui->fc_round_analyze = NULL;
+    ui->fc_round_flags_capacity = 0;
+    free(ui->fc_subject_analyze);
+    ui->fc_subject_analyze = NULL;
+    ui->fc_subject_flags_capacity = 0;
     if (about_window != NULL) {
         gtk_widget_destroy(about_window);
         about_window = NULL;

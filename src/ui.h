@@ -331,12 +331,20 @@ typedef struct Ui {
     /* per-dataset "analyze this dataset" checkboxes (true for new datasets) */
     bool          fc_dataset_analyze[FC_MAX_DATASETS];
     /* per-round "analyze" flags, flat dataset -> session -> round order */
+    /* per-session "analyze" flags, flat dataset -> session order */
+    bool         *fc_session_analyze;
+    size_t        fc_session_flags_capacity;
     bool         *fc_round_analyze;
     size_t        fc_round_flags_capacity;
     /* per-frequency-list (subject) "analyze" flags, flat
      * dataset -> session -> round -> subject order */
     bool         *fc_subject_analyze;
     size_t        fc_subject_flags_capacity;
+    /* saved child-selection masks: reselecting a parent restores exactly
+     * the children that were selected before the parent was deselected */
+    void         *fc_hist;
+    size_t        fc_hist_count;
+    size_t        fc_hist_cap;
     GtkWidget  *fc_view;             /* dataset/session tree (GtkTreeView) */
     GtkTreeStore *fc_model;          /* its model                       */
     GtkWidget  *fc_details_view;     /* schema details of the selection */
@@ -350,6 +358,12 @@ typedef struct Ui {
     GtkWidget  *fc_progress;
     GtkWidget  *fc_status_label;
     GtkWidget  *fc_report_view;      /* GtkTextView with the report     */
+    /* Statistics tab */
+    GtkWidget  *fc_stats_view;       /* GtkTextView with the statistics */
+    GtkWidget  *fc_stats_btn;        /* "Compute statistics"            */
+    GtkWidget  *fc_stats_save_btn;
+    GtkWidget  *fc_stats_conf_combo; /* 90 / 95 / 99 %                  */
+    char       *fc_stats_text;
     GtkWidget  *fc_report_format_combo;
     GtkWidget  *fc_report_save_btn;
     char       *fc_report_text;      /* rendered report, all formats    */

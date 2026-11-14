@@ -50,6 +50,7 @@
 #include "lte_uplink.h"
 #include "dagcore.h"
 #include "fcdag.h"
+#include "fcstats.h"
 #include "fcreport.h"
 #include "fcdataset.h"
 #include "fcdrift.h"
@@ -5612,6 +5613,137 @@ static void test_fcdag(void)
 /* The combined source test: a lattice dataset must be called supported, a
  * uniform (no-lattice) dataset must be called inconclusive. Both are fed
  * through the whole DAG from JSON files, so the node really runs. */
+/* The Statistics tab's report: descriptive numbers, bootstrap intervals and
+ * the two-level population estimates on a known dataset. */
+/* The analysis blocks must contain only the measurements of the frequency
+ * lists that remain in the dataset (the UI's selection snapshot is built by
+ * removing the unchecked lists/rounds before the DAG runs). */
+static void test_fc_selection_blocks(void)
+{
+    static const char *path = "/tmp/te15_sel_blocks.json";
+    static const char *json =
+        "{ \"dataset_id\": \"sel\", \"source_file\": \"s.csv\", "
+        "\"title\": \"Selection blocks\", \"notes\": [], \"sessions\": [ { "
+        "\"session_id\": 1, \"rounds\": [ { \"round_id\": \"r1\", "
+        "\"location\": null, \"date\": null, \"coordinates\": null, "
+        "\"closest_towers_enb_ids\": null, \"context\": null, "
+        "\"subjects_listed\": [], \"subjects\": [ "
+        "{\"name\": \"a\", \"measurements\": [1.0, 2.0]}, "
+        "{\"name\": \"b\", \"measurements\": [3.0, 4.0, 5.0]} ] }, "
+        "{ \"round_id\": \"r2\", \"location\": null, \"date\": null, "
+        "\"coordinates\": null, \"closest_towers_enb_ids\": null, "
+        "\"context\": null, \"subjects_listed\": [], \"subjects\": [ "
+        "{\"name\": \"c\", \"measurements\": [6.0, 7.0, 8.0, 9.0]} ] } "
+        "] } ] }";
+    FcDatasetList list;
+    FcRun *run;
+    char err[256] = "";
+    FILE *f;
+    size_t blocks;
+    size_t total = 0;
+
+    puts("\n-- Frequency Counter: analyses use selected lists only --");
+    fcd_list_init(&list);
+    f = fopen(path, "w");
+    CHECK(f != NULL);
+    if (f == NULL) return;
+    fputs(json, f);
+    fclose(f);
+    CHECK(fcd_load_file(&list, path, err, sizeof(err)));
+    CHECK(list.count == 1);
+    CHECK(fcd_remove_subject(&list.items[0], 0, 0, 1));   /* drop list b */
+    CHECK(fcd_count_measurements(&list.items[0]) == 6);
+    run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, NULL, NULL, err,
+                     sizeof(err));
+    CHECK(run != NULL);
+    if (run != NULL) {
+        blocks = dagcore_find(run, "blocks");
+        CHECK(blocks != (size_t)-1);
+        if (blocks != (size_t)-1 && run->nodes[blocks].payload != NULL) {
+            FclTable *t = (FclTable *)run->nodes[blocks].payload;
+
+            /* round r1 (a only = 2) + subject a (2) + round r2 (4) +
+             * subject c (4) = 12; list b (3) must not appear anywhere */
+            for (size_t r = 0; r < t->n_rows; r++) {
+                total += (size_t)strtoul(t->cells[r][2], NULL, 10);
+            }
+            printf("  block measurements: %zu (expected 12)\n", total);
+            CHECK(total == 12);
+        }
+        fc_dag_free(run);
+    }
+    fcd_list_clear(&list);
+    remove(path);
+}
+
+static void test_fcstats(void)
+{
+    static const char *path = "/tmp/te15_stats.json";
+    static const char *json =
+        "{ \"dataset_id\": \"stats\", \"source_file\": \"s.csv\", "
+        "\"title\": \"Stats test\", \"notes\": [], \"sessions\": [ { "
+        "\"session_id\": 1, \"rounds\": [ { \"round_id\": \"r1\", "
+        "\"location\": null, \"date\": null, \"coordinates\": null, "
+        "\"closest_towers_enb_ids\": null, \"context\": null, "
+        "\"subjects_listed\": [], \"subjects\": [ "
+        "{\"name\": \"a\", \"measurements\": [1.0, 2.0, 3.0]}, "
+        "{\"name\": \"b\", \"measurements\": [4.0, 5.0, 6.0]} ] }, "
+        "{ \"round_id\": \"r2\", \"location\": null, \"date\": null, "
+        "\"coordinates\": null, \"closest_towers_enb_ids\": null, "
+        "\"context\": null, \"subjects_listed\": [], \"subjects\": [ "
+        "{\"name\": \"c\", \"measurements\": [7.0, 8.0, 9.0]} ] } ] } ] }";
+    FcDatasetList list;
+    FcStatsOptions opt;
+    char *text;
+    FILE *f;
+
+    puts("\n-- Frequency Counter statistics --");
+    fcd_list_init(&list);
+    f = fopen(path, "w");
+    CHECK(f != NULL);
+    if (f == NULL) return;
+    fputs(json, f);
+    fclose(f);
+    CHECK(fcd_load_file(&list, path, NULL, 0));
+    CHECK(list.count == 1);
+    memset(&opt, 0, sizeof(opt));
+    opt.confidence = 95;
+    opt.bootstrap = 400;
+    opt.per_round = true;
+    text = fc_stats_report(&list, FCL_SCOPE_PER_DATASET, &opt);
+    CHECK(text != NULL);
+    if (text != NULL) {
+        CHECK(strstr(text, "FREQUENCY COUNTER STATISTICS") != NULL);
+        CHECK(strstr(text, "measurements: 9") != NULL);
+        CHECK(strstr(text, "mean              5.000000") != NULL);
+        CHECK(strstr(text, "std. deviation    2.738613") != NULL);
+        CHECK(strstr(text, "median            5.000000") != NULL);
+        CHECK(strstr(text, "Jarque-Bera") != NULL);
+        CHECK(strstr(text, "Bootstrap confidence intervals (95%") != NULL);
+        CHECK(strstr(text, "Population estimates") != NULL);
+        CHECK(strstr(text, "ICC") != NULL);
+        CHECK(strstr(text, "design effect") != NULL);
+        CHECK(strstr(text, "effective n") != NULL);
+        CHECK(strstr(text, "population mean") != NULL);
+        CHECK(strstr(text, "Allan deviation") != NULL);
+        free(text);
+    }
+    opt.confidence = 90;
+    text = fc_stats_report(&list, FCL_SCOPE_MERGED, &opt);
+    CHECK(text != NULL);
+    if (text != NULL) {
+        CHECK(strstr(text, "90%") != NULL);
+        CHECK(strstr(text, "Merged") != NULL ||
+              strstr(text, "merged") != NULL);
+        free(text);
+    }
+    text = fc_stats_report(NULL, FCL_SCOPE_PER_DATASET, NULL);
+    CHECK(text != NULL && strstr(text, "No datasets loaded") != NULL);
+    free(text);
+    fcd_list_clear(&list);
+    remove(path);
+}
+
 static void test_fc_hypothesis(void)
 {
     static const char *lattice_path = "/tmp/te15_hyp_lattice.json";
@@ -6268,6 +6400,8 @@ int main(void)
     test_fcdataset();
     test_fcdag();
     test_fc_hypothesis();
+    test_fcstats();
+    test_fc_selection_blocks();
     test_rank_canonical();
     test_synth_matches();
     test_lte_hint();
