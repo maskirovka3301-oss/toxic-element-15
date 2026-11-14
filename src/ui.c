@@ -8678,23 +8678,11 @@ static gboolean on_fc_dataset_toggled(GtkCellRendererToggle *renderer,
         return FALSE;
     }
     if (ui->fc_status_label != NULL) {
-        size_t selected = 0, sessions = 0, sessions_total = 0;
-        size_t rounds = 0, rounds_total = 0;
-        size_t lists = 0, lists_total = 0;
+        size_t selected = 0, lists = 0, lists_total = 0;
 
         for (size_t i = 0; i < ui->fc_datasets.count &&
                            i < FC_MAX_DATASETS; i++) {
             if (ui->fc_dataset_analyze[i]) selected++;
-        }
-        sessions_total = fc_sessions_total(ui);
-        for (size_t i = 0; i < sessions_total &&
-                           i < ui->fc_session_flags_capacity; i++) {
-            if (ui->fc_session_analyze[i]) sessions++;
-        }
-        rounds_total = fc_rounds_total(ui);
-        for (size_t i = 0; i < rounds_total &&
-                           i < ui->fc_round_flags_capacity; i++) {
-            if (ui->fc_round_analyze[i]) rounds++;
         }
         lists_total = fc_subjects_total(ui);
         for (size_t i = 0; i < lists_total &&
@@ -8702,15 +8690,12 @@ static gboolean on_fc_dataset_toggled(GtkCellRendererToggle *renderer,
             if (ui->fc_subject_analyze[i]) lists++;
         }
         {
-            char msg[384];
+            char msg[320];
 
-            snprintf(msg, sizeof(msg), "%zu of %zu dataset%s, %zu of %zu "
-                     "session%s, %zu of %zu round%s and %zu of %zu frequency "
-                     "list%s selected for analysis.", selected,
+            snprintf(msg, sizeof(msg), "%zu of %zu dataset%s and %zu of %zu "
+                     "frequency list%s selected for analysis.", selected,
                      ui->fc_datasets.count,
-                     ui->fc_datasets.count == 1 ? "" : "s", sessions,
-                     sessions_total, sessions_total == 1 ? "" : "s", rounds,
-                     rounds_total, rounds_total == 1 ? "" : "s", lists,
+                     ui->fc_datasets.count == 1 ? "" : "s", lists,
                      lists_total, lists_total == 1 ? "" : "s");
             gtk_label_set_text(GTK_LABEL(ui->fc_status_label), msg);
         }
@@ -8724,12 +8709,16 @@ static gboolean on_fc_dataset_toggled(GtkCellRendererToggle *renderer,
 static bool fc_analyze_snapshot(Ui *ui, FcDatasetList *out)
 {
     if (!fcd_list_clone(&ui->fc_datasets, out)) return false;
-    /* The clone keeps the original order, so the flag indices of the UI
-     * list are valid while entries are removed from the END of each level.
-     * Order matters: frequency lists are removed first (before rounds, so
-     * the round indices still match the original rounds), then rounds,
-     * then sessions, then whole datasets. Unchecked data is therefore never
-     * passed to the analyses. */
+    /* The analyses and statistics use every CHECKED FREQUENCY LIST: the
+     * leaf checkbox is authoritative. Session and round checkboxes are bulk
+     * selection controls - they toggle the lists below them - but their own
+     * state never excludes a list that is still checked (a list re-checked
+     * under an unchecked parent is analysed). Only unchecked datasets are
+     * excluded as a whole (that is the dataset checkbox contract).
+     *
+     * Removal order is index-safe: lists first (while rounds/sessions still
+     * match the original indices), then rounds left without lists, then
+     * whole datasets. */
     for (size_t d = 0; d < ui->fc_datasets.count; d++) {
         const FcDataset *ds = &ui->fc_datasets.items[d];
 
@@ -8746,35 +8735,6 @@ static bool fc_analyze_snapshot(Ui *ui, FcDatasetList *out)
                                                 (int)ji)) {
                         fcd_remove_subject(&out->items[d], s, r, ji);
                     }
-                }
-            }
-        }
-    }
-    for (size_t d = 0; d < ui->fc_datasets.count; d++) {
-        const FcDataset *ds = &ui->fc_datasets.items[d];
-
-        for (size_t s = 0; s < ds->n_sessions; s++) {
-            size_t rn = ds->sessions[s].n_rounds;
-
-            for (size_t r = rn; r > 0; r--) {
-                size_t ri = r - 1;
-
-                if (!fc_round_is_selected(ui, (int)d, (int)s, (int)ri)) {
-                    fcd_remove_round(&out->items[d], s, ri);
-                }
-            }
-        }
-    }
-    for (size_t d = 0; d < ui->fc_datasets.count; d++) {
-        const FcDataset *ds = &ui->fc_datasets.items[d];
-
-        for (size_t s = 0; s < ds->n_sessions; s++) {
-            if (fc_session_is_selected(ui, (int)d, (int)s)) continue;
-            {
-                size_t rn = ds->sessions[s].n_rounds;
-
-                for (size_t r = rn; r > 0; r--) {
-                    fcd_remove_round(&out->items[d], s, r - 1);
                 }
             }
         }
@@ -8803,6 +8763,7 @@ static bool fc_analyze_snapshot(Ui *ui, FcDatasetList *out)
     }
     return true;
 }
+
 
 
 /* Count the datasets whose checkbox is checked. */

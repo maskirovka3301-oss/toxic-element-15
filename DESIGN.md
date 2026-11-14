@@ -229,10 +229,13 @@ The lattice tests use the 3GPP candidate spacings:
   deselects all of its children and remembers their selection
   (`fc_hist_*` masks); re-selecting the parent restores exactly the children
   that were selected before it was deselected. The Analyze/Statistics runs
-  copy only the checked datasets, sessions, rounds and frequency lists into
-  the worker snapshot, removing the unchecked entries in index-safe order
-  (lists first, then rounds, then sessions, then whole datasets), so no
-  analysis ever sees measurements of an unchecked frequency list; the Settings "Analysis scope" radio
+  use exactly the CHECKED FREQUENCY LISTS: the leaf checkbox is
+  authoritative, so a list re-checked under an unchecked session/round is
+  still analysed, while session/round boxes act as bulk selectors only; an
+  unchecked dataset is excluded as a whole (its checkbox contract). The
+  worker snapshot therefore removes the unchecked lists (and rounds left
+  empty, and unchecked datasets) in index-safe order, so no analysis ever
+  sees measurements of an unchecked frequency list; the Settings "Analysis scope" radio
   reads "Analyze selected datasets separately" (per checked dataset) or
   merges the checked datasets into one list.
 * **Multiple testing**: Benjamini-Hochberg and Bonferroni correction per
