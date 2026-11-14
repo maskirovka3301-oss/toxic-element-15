@@ -18,6 +18,8 @@
 
 #include "iq_source.h"
 #include "waterfall_cache.h"
+#include "fcdag.h"
+#include "freqseries.h"
 #include "lte_uplink.h"
 #include "renderbuf.h"
 #include "analysis.h"
@@ -317,7 +319,29 @@ typedef struct Ui {
     GtkWidget *window;
     GtkWidget *main_notebook;   /* main view tabs (currently "Spectrum") */
     GtkWidget *spectrum_page;   /* the page holding the waterfall + dock */
-    GtkWidget *freq_counter_page;   /* second main tab (empty for now)  */
+    GtkWidget *freq_counter_page;   /* second main tab                  */
+    /* --- Frequency Counter: measurement sessions + analysis --- */
+    FreqSeriesList fc_series;        /* loaded measurement sessions     */
+    GtkWidget  *fc_view;             /* session list (GtkTreeView)      */
+    GtkListStore *fc_store;          /* its model                       */
+    GtkWidget  *fc_label_entry;      /* session properties editor       */
+    GtkWidget  *fc_lat_entry;
+    GtkWidget  *fc_lon_entry;
+    GtkWidget  *fc_datetime_entry;
+    GtkWidget  *fc_notes_entry;
+    GtkWidget  *fc_remove_btn;
+    GtkWidget  *fc_remove_all_btn;
+    GtkWidget  *fc_analyze_btn;      /* Analysis pane controls          */
+    GtkWidget  *fc_progress;
+    GtkWidget  *fc_status_label;
+    GtkWidget  *fc_report_view;      /* GtkTextView with the report     */
+    GtkWidget  *fc_report_format_combo;
+    GtkWidget  *fc_report_save_btn;
+    char       *fc_report_text;      /* rendered report, all formats    */
+    char       *fc_report_markdown;
+    char       *fc_report_html;
+    int         fc_report_format;
+    void       *fc_job;              /* running FcJob (async analysis)  */
     GtkWidget *drawing;
     /* stationary-hover hint ("Shift+Click to select"): drawn inside the
      * waterfall with the same in-widget tag style as the frequency readout */

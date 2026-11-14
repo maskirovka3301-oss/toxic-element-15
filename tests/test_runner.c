@@ -48,6 +48,8 @@
 #include "waterfall_cache.h"
 #include "streambuf.h"
 #include "lte_uplink.h"
+#include "fcdag.h"
+#include "freqseries.h"
 #include "renderbuf.h"
 
 static int checks_run = 0;
@@ -4253,6 +4255,128 @@ static void test_synth_matches(void)
     CHECK(fabs(spec.symbol_rate - 270833.0) < 1.0);
 }
 
+/* ------------------------------------------------------------------ */
+/* Frequency Counter: measurement sessions and the analysis DAG       */
+/* ------------------------------------------------------------------ */
+
+static void write_text_file(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "wb");
+
+    if (f != NULL) {
+        fwrite(text, 1, strlen(text), f);
+        fclose(f);
+    }
+}
+
+static void test_freqseries(void)
+{
+    FreqSeriesList list;
+    char err[256] = "";
+    char path[] = "/tmp/te15_fc_sessions.txt";
+
+    puts("\n-- Frequency Counter sessions --");
+    fsl_init(&list);
+    write_text_file(path,
+                    "# a comment line\n"
+                    "2530000123.5\n"
+                    "\n"
+                    "  2530000999.25  \n"
+                    "2.5300005e9\n"
+                    "garbage line\n"
+                    "2530002000.0 # trailing comment\n");
+    CHECK(fsl_load_file(&list, path, err, sizeof(err)));
+    printf("  loaded %zu session(s), %zu points, label '%s'\n", list.count,
+           list.count > 0 ? list.items[0].count : 0,
+           list.count > 0 ? list.items[0].label : "-");
+    CHECK(list.count == 1);
+    if (list.count == 1) {
+        const FreqSession *s = &list.items[0];
+
+        CHECK(s->count == 4);   /* the garbage line is skipped */
+        CHECK(fabs(s->freqs[0] - 2530000123.5) < 1e-3);
+        CHECK(fabs(s->freqs[1] - 2530000999.25) < 1e-3);
+        CHECK(fabs(s->freqs[2] - 2.5300005e9) < 1.0);
+        CHECK(fabs(s->freqs[3] - 2530002000.0) < 1e-3);
+        CHECK(s->label != NULL && strcmp(s->label, "te15_fc_sessions") == 0);
+        CHECK(s->datetime != NULL);
+        CHECK(s->notes != NULL);
+        CHECK(!s->has_location);
+        /* user metadata */
+        fsl_set_label(&list.items[0], "Utrecht test");
+        fsl_set_location(&list.items[0], true, 52.0907, 5.1214);
+        fsl_set_notes(&list.items[0], "steady carrier");
+        fsl_set_datetime(&list.items[0], "2026-11-14 16:40");
+        CHECK(strcmp(list.items[0].label, "Utrecht test") == 0);
+        CHECK(list.items[0].has_location);
+        CHECK(fabs(list.items[0].lat - 52.0907) < 1e-9);
+        CHECK(fabs(list.items[0].lon - 5.1214) < 1e-9);
+    }
+    CHECK(fsl_total_points(&list) == 4);
+
+    /* deep copy + remove */
+    {
+        FreqSeriesList copy;
+
+        CHECK(fsl_clone(&list, &copy));
+        CHECK(copy.count == 1 && copy.items[0].count == 4);
+        CHECK(copy.items[0].freqs != list.items[0].freqs);
+        fsl_clear(&copy);
+    }
+    fsl_remove(&list, 0);
+    CHECK(list.count == 0);
+    fsl_remove(&list, 5);   /* out of range: ignored */
+    CHECK(list.count == 0);
+    fsl_clear(&list);
+
+    /* a file with no measurements is rejected */
+    write_text_file(path, "# only comments\n\nfoo\n");
+    CHECK(!fsl_load_file(&list, path, err, sizeof(err)));
+    CHECK(err[0] != '\0');
+    fsl_clear(&list);
+    remove(path);
+}
+
+static void test_fcdag(void)
+{
+    FreqSeriesList list;
+    FcRun *run;
+    char err[256] = "";
+    char *text = NULL, *md = NULL, *html = NULL;
+
+    puts("\n-- Frequency Counter analysis DAG --");
+    fsl_init(&list);
+    CHECK(fc_node_count == 0);   /* no analyses are implemented yet */
+    run = fc_dag_run(&list, err, sizeof(err));
+    CHECK(run != NULL);
+    if (run != NULL) {
+        CHECK(run->count == 0);
+        fc_dag_report(&list, run, &text, &md, &html);
+        CHECK(text != NULL && md != NULL && html != NULL);
+        if (text != NULL) {
+            printf("  report: %zu chars, has header=%d, has DAG section=%d\n",
+                   strlen(text), strstr(text, "FREQUENCY COUNTER ANALYSIS") !=
+                                     NULL,
+                   strstr(text, "DAG") != NULL);
+            CHECK(strstr(text, "FREQUENCY COUNTER ANALYSIS REPORT") != NULL);
+            CHECK(strstr(text, "Registry: 0 analyses defined") != NULL);
+            CHECK(strstr(text, "no analyses are defined") != NULL ||
+                  strstr(text, "not implemented yet") != NULL);
+        }
+        if (md != NULL) CHECK(strstr(md, "# Frequency Counter Analysis") != NULL);
+        if (html != NULL) {
+            CHECK(strstr(html, "<!DOCTYPE html>") != NULL);
+            CHECK(strstr(html, "<h1>Frequency Counter Analysis Report</h1>") !=
+                  NULL);
+        }
+        free(text);
+        free(md);
+        free(html);
+        fc_dag_free(run);
+    }
+    fsl_clear(&list);
+}
+
 static void test_lte_hint(void)
 {
     LteHint hint;
@@ -4767,6 +4891,8 @@ int main(void)
     test_cache_row();
     test_streambuf();
     test_renderbuf();
+    test_freqseries();
+    test_fcdag();
     test_rank_canonical();
     test_synth_matches();
     test_lte_hint();

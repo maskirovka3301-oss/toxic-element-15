@@ -33,6 +33,8 @@ APP_SRC := \
 	src/waterfall_cache.c \
 	src/streambuf.c \
 	src/renderbuf.c \
+	src/freqseries.c \
+	src/fcdag.c \
 	src/lte_uplink.c \
 	src/analysis.c \
 	src/metrics.c \
@@ -77,6 +79,8 @@ TEST_SRC := \
 	src/waterfall_cache.c \
 	src/streambuf.c \
 	src/renderbuf.c \
+	src/freqseries.c \
+	src/fcdag.c \
 	src/lte_uplink.c \
 	src/analysis.c \
 	src/metrics.c \
@@ -114,8 +118,16 @@ TEST_DATA := data/gqrx_20260306_174402_2530000000_2000000_fc.raw
 
 all: build/te15
 
-build/te15: $(APP_SRC) src/*.h | build
-	$(CC) $(ALL_CFLAGS) -o $@ $(APP_SRC) $(LDLIBS)
+ABOUT_IMAGE := build/about_image.c
+
+# The About artwork is embedded in the executable (generated from the JPEG
+# at build time; nothing is read from media/ at run time).
+$(ABOUT_IMAGE): media/about.jpg tools/bin2c.c | build
+	$(CC) -O1 -o build/bin2c tools/bin2c.c
+	./build/bin2c media/about.jpg te15_about_jpeg > $@.tmp && mv $@.tmp $@
+
+build/te15: $(APP_SRC) $(ABOUT_IMAGE) src/*.h | build
+	$(CC) $(ALL_CFLAGS) -o $@ $(APP_SRC) $(ABOUT_IMAGE) $(LDLIBS)
 
 build/test_runner: $(TEST_SRC) src/*.h | build
 	$(CC) $(ALL_CFLAGS) -o $@ $(TEST_SRC) $(FFTW_LIBS) $(AUDIO_LIBS) -lpthread -lm

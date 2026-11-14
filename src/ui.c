@@ -41,6 +41,9 @@
 #include "lte_uplink.h"
 #include "aconfig.h"
 #include "debug.h"
+#include "about_image.h"
+#include "fcdag.h"
+#include "freqseries.h"
 #include "fit.h"
 #include "wav.h"
 
@@ -3991,7 +3994,6 @@ static void on_open_menu(GtkMenuItem *item, gpointer user_data)
 #define ABOUT_TITLE   "Toxic Element 15"
 #define ABOUT_AUTHOR  "Daniel R. Azulay | Radio Defense"
 #define ABOUT_YEAR    "2026"
-#define ABOUT_IMAGE_REL "data/about.jpg"
 #define ABOUT_WINDOW_W 900
 #define ABOUT_WINDOW_H 604
 
@@ -4003,80 +4005,31 @@ static void on_open_menu(GtkMenuItem *item, gpointer user_data)
 static GtkWidget *about_window = NULL;
 static cairo_surface_t *about_image = NULL;
 
-/* Locate the About artwork: the repository's data/ directory, relative to
- * the working directory or to the executable (build/te15). */
-static bool about_image_path(char *out, size_t n)
-{
-    static const char *const rel[] = {
-        ABOUT_IMAGE_REL, "../" ABOUT_IMAGE_REL, "../../" ABOUT_IMAGE_REL
-    };
-    char exe[4096];
-    char dir[4096] = "";
-
-    for (size_t i = 0; i < sizeof(rel) / sizeof(rel[0]); i++) {
-        if (g_file_test(rel[i], G_FILE_TEST_EXISTS)) {
-            snprintf(out, n, "%s", rel[i]);
-            return true;
-        }
-    }
-#if defined(__APPLE__)
-    {
-        uint32_t size = sizeof(exe);
-
-        if (_NSGetExecutablePath(exe, &size) == 0) {
-            char *slash = strrchr(exe, '/');
-
-            if (slash != NULL) {
-                *slash = '\0';
-                snprintf(dir, sizeof(dir), "%s", exe);
-            }
-        }
-    }
-#elif defined(__linux__)
-    {
-        ssize_t len = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-
-        if (len > 0) {
-            char *slash;
-
-            exe[len] = '\0';
-            slash = strrchr(exe, '/');
-            if (slash != NULL) {
-                *slash = '\0';
-                snprintf(dir, sizeof(dir), "%s", exe);
-            }
-        }
-    }
-#endif
-    if (dir[0] != '\0') {
-        const char *const sub[] = {
-            "/../" ABOUT_IMAGE_REL, "/" ABOUT_IMAGE_REL,
-            "/../../" ABOUT_IMAGE_REL
-        };
-
-        for (size_t i = 0; i < sizeof(sub) / sizeof(sub[0]); i++) {
-            snprintf(out, n, "%s%s", dir, sub[i]);
-            if (g_file_test(out, G_FILE_TEST_EXISTS)) return true;
-        }
-    }
-    return false;
-}
-
-/* Load the artwork once (gdk-pixbuf decodes the JPEG into a cairo
- * surface; cairo itself only reads PNG). */
+/* Decode the embedded About artwork (a JPEG in the executable; nothing is
+ * read from disk at run time). The surface is cached. */
 static cairo_surface_t *about_image_load(void)
 {
-    char path[4096];
+    GdkPixbufLoader *loader;
+    GdkPixbuf *pixbuf = NULL;
     GError *err = NULL;
-    GdkPixbuf *pixbuf;
 
     if (about_image != NULL) return about_image;
-    if (!about_image_path(path, sizeof(path))) return NULL;
-    pixbuf = gdk_pixbuf_new_from_file(path, &err);
-    if (pixbuf == NULL) {
-        if (err != NULL) g_error_free(err);
+    loader = gdk_pixbuf_loader_new();
+    if (loader == NULL) return NULL;
+    if (!gdk_pixbuf_loader_write(loader, te15_about_jpeg, te15_about_jpeg_len,
+                                 &err) ||
+        !gdk_pixbuf_loader_close(loader, &err)) {
+        if (err != NULL) {
+            g_error_free(err);
+            err = NULL;
+        }
+        g_object_unref(loader);
         return NULL;
     }
+    pixbuf = gdk_pixbuf_loader_get_pixbuf(loader);
+    if (pixbuf != NULL) g_object_ref(pixbuf);
+    g_object_unref(loader);
+    if (pixbuf == NULL) return NULL;
     about_image = cairo_image_surface_create(CAIRO_FORMAT_RGB24,
                                              gdk_pixbuf_get_width(pixbuf),
                                              gdk_pixbuf_get_height(pixbuf));
@@ -6323,6 +6276,7 @@ void ui_init(Ui *ui, IqSource *src, WaterfallCache *cache)
     ui->ss_estimator = 0;      /* Fluctuations */
     ui->last_progress = -1;
     ui->stream_buffer_fraction = 1.0 / 8.0;
+    fsl_init(&ui->fc_series);
     ui->streambuf = sb_create(cache, ui->stream_buffer_fraction);
     if (ui->streambuf != NULL) sb_wait_ready(ui->streambuf, 2000);
     ui->renderbuf = rb_create(cache, ui->streambuf);
@@ -7307,18 +7261,718 @@ static GtkWidget *build_demodulate_page(Ui *ui)
 
 /* --- Frequency Counter tab --------------------------------------------- */
 
-/* The "Frequency Counter" page is intentionally empty: it is a placeholder
- * tab next to Spectrum, ready to receive its controls later. */
-static GtkWidget *build_freq_counter_page(Ui *ui)
+enum {
+    FC_COL_LABEL = 0,
+    FC_COL_DATETIME,
+    FC_COL_LOCATION,
+    FC_COL_POINTS,
+    FC_COL_NOTES,
+    FC_COL_COUNT
+};
+
+/* Async analysis job (mirrors the Spectrum tab's worker/idle delivery). */
+typedef struct {
+    Ui             *ui;
+    FreqSeriesList  snapshot;
+    volatile int    cancelled;
+    char           *text;
+    char           *markdown;
+    char           *html;
+    char            err[256];
+    size_t          nodes;
+    double          elapsed_s;
+} FcJob;
+
+static gboolean fc_deliver(gpointer data);
+static gpointer fc_worker(gpointer data);
+
+static int fc_selected_index(const Ui *ui)
+{
+    GtkTreeSelection *sel;
+    GtkTreeIter iter;
+    GtkTreeModel *model;
+    GtkTreePath *path;
+    int index = -1;
+
+    if (ui->fc_view == NULL) return -1;
+    sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(ui->fc_view));
+    if (!gtk_tree_selection_get_selected(sel, &model, &iter)) return -1;
+    path = gtk_tree_model_get_path(model, &iter);
+    if (path != NULL) {
+        index = gtk_tree_path_get_indices(path)[0];
+        gtk_tree_path_free(path);
+    }
+    return index;
+}
+
+/* Refresh the list view from the session array (selection preserved when
+ * possible); returns the selected index (-1 when none). */
+static int fc_refresh_store(Ui *ui, int select_index)
+{
+    GtkTreeSelection *sel;
+
+    if (ui->fc_store == NULL) return -1;
+    gtk_list_store_clear(ui->fc_store);
+    for (size_t i = 0; i < ui->fc_series.count; i++) {
+        const FreqSession *s = &ui->fc_series.items[i];
+        GtkTreeIter it;
+        char location[64];
+        char points[32];
+
+        if (s->has_location) {
+            snprintf(location, sizeof(location), "%.5f, %.5f", s->lat, s->lon);
+        } else {
+            snprintf(location, sizeof(location), "%s", "—");
+        }
+        snprintf(points, sizeof(points), "%zu", s->count);
+        gtk_list_store_append(ui->fc_store, &it);
+        gtk_list_store_set(ui->fc_store, &it,
+                           FC_COL_LABEL, s->label != NULL ? s->label : "",
+                           FC_COL_DATETIME,
+                           s->datetime != NULL ? s->datetime : "",
+                           FC_COL_LOCATION, location,
+                           FC_COL_POINTS, points,
+                           FC_COL_NOTES, s->notes != NULL ? s->notes : "",
+                           -1);
+    }
+    if (select_index >= 0 && (size_t)select_index < ui->fc_series.count) {
+        GtkTreePath *path = gtk_tree_path_new_from_indices(select_index, -1);
+
+        sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(ui->fc_view));
+        gtk_tree_selection_select_path(sel, path);
+        gtk_tree_view_set_cursor(GTK_TREE_VIEW(ui->fc_view), path, NULL, FALSE);
+        gtk_tree_path_free(path);
+    }
+    return select_index >= 0 && (size_t)select_index < ui->fc_series.count
+               ? select_index : -1;
+}
+
+/* Loading the session metadata into the entry widgets must not write it
+ * back: this guard is raised while the widgets are being populated. */
+static bool fc_loading_meta;
+
+static void fc_set_entry(GtkWidget *entry, const char *text)
+{
+    if (entry == NULL) return;
+    gtk_entry_set_text(GTK_ENTRY(entry), text != NULL ? text : "");
+}
+
+/* Show one session's metadata in the property editor (or clear it). */
+static void fc_show_session(Ui *ui, int index)
+{
+    bool have = index >= 0 && (size_t)index < ui->fc_series.count;
+    const FreqSession *s = have ? &ui->fc_series.items[index] : NULL;
+    char lat[32] = "";
+    char lon[32] = "";
+
+    fc_loading_meta = true;
+    if (s != NULL && s->has_location) {
+        snprintf(lat, sizeof(lat), "%.6f", s->lat);
+        snprintf(lon, sizeof(lon), "%.6f", s->lon);
+    }
+    fc_set_entry(ui->fc_label_entry, s != NULL ? s->label : "");
+    fc_set_entry(ui->fc_lat_entry, lat);
+    fc_set_entry(ui->fc_lon_entry, lon);
+    fc_set_entry(ui->fc_datetime_entry, s != NULL ? s->datetime : "");
+    fc_set_entry(ui->fc_notes_entry, s != NULL ? s->notes : "");
+    if (ui->fc_label_entry != NULL) {
+        gtk_widget_set_sensitive(ui->fc_label_entry, have);
+        gtk_widget_set_sensitive(ui->fc_lat_entry, have);
+        gtk_widget_set_sensitive(ui->fc_lon_entry, have);
+        gtk_widget_set_sensitive(ui->fc_datetime_entry, have);
+        gtk_widget_set_sensitive(ui->fc_notes_entry, have);
+    }
+    if (ui->fc_remove_btn != NULL) {
+        gtk_widget_set_sensitive(ui->fc_remove_btn, have);
+    }
+    fc_loading_meta = false;
+}
+
+static void on_fc_selection_changed(GtkTreeSelection *sel, gpointer user_data)
+{
+    Ui *ui = (Ui *)user_data;
+    GtkTreeModel *model;
+    GtkTreeIter iter;
+    int index = -1;
+
+    (void)sel;
+    if (ui->fc_view != NULL &&
+        gtk_tree_selection_get_selected(
+            gtk_tree_view_get_selection(GTK_TREE_VIEW(ui->fc_view)), &model,
+            &iter)) {
+        GtkTreePath *path = gtk_tree_model_get_path(model, &iter);
+
+        if (path != NULL) {
+            index = gtk_tree_path_get_indices(path)[0];
+            gtk_tree_path_free(path);
+        }
+    }
+    fc_show_session(ui, index);
+}
+
+/* Apply the property entries to the selected session and refresh its row. */
+static void fc_apply_metadata(Ui *ui)
+{
+    int index;
+    FreqSession *s;
+    char lat_text[64], lon_text[64];
+    double lat = 0.0, lon = 0.0;
+    bool has_location = false;
+
+    if (fc_loading_meta) return;
+    index = fc_selected_index(ui);
+    if (index < 0 || (size_t)index >= ui->fc_series.count) return;
+    s = &ui->fc_series.items[index];
+    fsl_set_label(s, gtk_entry_get_text(GTK_ENTRY(ui->fc_label_entry)));
+    fsl_set_datetime(s,
+                     gtk_entry_get_text(GTK_ENTRY(ui->fc_datetime_entry)));
+    fsl_set_notes(s, gtk_entry_get_text(GTK_ENTRY(ui->fc_notes_entry)));
+    snprintf(lat_text, sizeof(lat_text), "%s",
+             gtk_entry_get_text(GTK_ENTRY(ui->fc_lat_entry)));
+    snprintf(lon_text, sizeof(lon_text), "%s",
+             gtk_entry_get_text(GTK_ENTRY(ui->fc_lon_entry)));
+    if (lat_text[0] != '\0' && lon_text[0] != '\0') {
+        char *end = NULL;
+
+        lat = g_ascii_strtod(lat_text, &end);
+        if (end != lat_text) {
+            end = NULL;
+            lon = g_ascii_strtod(lon_text, &end);
+            if (end != lon_text) has_location = true;
+        }
+    }
+    fsl_set_location(s, has_location, lat, lon);
+    {
+        GtkTreeIter it;
+        GtkTreePath *path = gtk_tree_path_new_from_indices(index, -1);
+        char location[64];
+
+        if (s->has_location) {
+            snprintf(location, sizeof(location), "%.5f, %.5f", s->lat, s->lon);
+        } else {
+            snprintf(location, sizeof(location), "%s", "—");
+        }
+        if (gtk_tree_model_get_iter(GTK_TREE_MODEL(ui->fc_store), &it, path)) {
+            gtk_list_store_set(ui->fc_store, &it,
+                               FC_COL_LABEL, s->label != NULL ? s->label : "",
+                               FC_COL_DATETIME,
+                               s->datetime != NULL ? s->datetime : "",
+                               FC_COL_LOCATION, location,
+                               FC_COL_NOTES, s->notes != NULL ? s->notes : "",
+                               -1);
+        }
+        gtk_tree_path_free(path);
+    }
+}
+
+static void on_fc_meta_changed(GtkEditable *editable, gpointer user_data)
+{
+    (void)editable;
+    fc_apply_metadata((Ui *)user_data);
+}
+
+/* Load one or more measurement files and append them as sessions. */
+static void fc_load_paths(Ui *ui, char *const *paths, size_t n_paths)
+{
+    size_t first = ui->fc_series.count;
+    size_t loaded = 0;
+    char last_err[256] = "";
+
+    for (size_t i = 0; i < n_paths; i++) {
+        char err[256] = "";
+
+        if (fsl_load_file(&ui->fc_series, paths[i], err, sizeof(err))) {
+            loaded++;
+        } else {
+            snprintf(last_err, sizeof(last_err), "%s", err);
+        }
+    }
+    if (loaded > 0) {
+        fc_refresh_store(ui, (int)first);
+        fc_show_session(ui, (int)first);
+    }
+    if (ui->fc_status_label != NULL) {
+        char text[512];
+
+        if (loaded > 0 && last_err[0] == '\0') {
+            snprintf(text, sizeof(text),
+                     "Loaded %zu session%s (%zu measurements).", loaded,
+                     loaded == 1 ? "" : "s", fsl_total_points(&ui->fc_series));
+        } else if (loaded > 0) {
+            snprintf(text, sizeof(text),
+                     "Loaded %zu session%s; %s", loaded,
+                     loaded == 1 ? "" : "s", last_err);
+        } else {
+            snprintf(text, sizeof(text), "%s",
+                     last_err[0] != '\0' ? last_err : "No files loaded.");
+        }
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label), text);
+    }
+}
+
+static void on_fc_load_clicked(GtkButton *button, gpointer user_data)
+{
+    Ui *ui = (Ui *)user_data;
+    GtkWidget *dialog;
+    GtkFileFilter *filter;
+    int response;
+
+    (void)button;
+    dialog = gtk_file_chooser_dialog_new(
+        "Load frequency measurements", GTK_WINDOW(ui->window),
+        GTK_FILE_CHOOSER_ACTION_OPEN, "Cancel", GTK_RESPONSE_CANCEL, "Open",
+        GTK_RESPONSE_ACCEPT, NULL);
+    gtk_file_chooser_set_select_multiple(GTK_FILE_CHOOSER(dialog), TRUE);
+    filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(filter, "Text files");
+    gtk_file_filter_add_pattern(filter, "*.txt");
+    gtk_file_filter_add_pattern(filter, "*.dat");
+    gtk_file_filter_add_pattern(filter, "*.csv");
+    gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), filter);
+    response = gtk_dialog_run(GTK_DIALOG(dialog));
+    if (response == GTK_RESPONSE_ACCEPT) {
+        GSList *names = gtk_file_chooser_get_filenames(GTK_FILE_CHOOSER(
+            dialog));
+        size_t n = g_slist_length(names);
+        char **paths = n > 0 ? calloc(n, sizeof(*paths)) : NULL;
+
+        if (paths != NULL) {
+            size_t i = 0;
+
+            for (GSList *l = names; l != NULL; l = l->next) {
+                paths[i++] = (char *)l->data;
+            }
+            fc_load_paths(ui, paths, n);
+            free(paths);
+        }
+        for (GSList *l = names; l != NULL; l = l->next) g_free(l->data);
+        g_slist_free(names);
+    }
+    gtk_widget_destroy(dialog);
+}
+
+static void on_fc_remove_clicked(GtkButton *button, gpointer user_data)
+{
+    Ui *ui = (Ui *)user_data;
+    int index = fc_selected_index(ui);
+
+    (void)button;
+    if (index < 0) return;
+    fsl_remove(&ui->fc_series, (size_t)index);
+    {
+        int next = index < (int)ui->fc_series.count ? index : -1;
+        int sel = fc_refresh_store(ui, next);
+
+        fc_show_session(ui, sel);
+    }
+    if (ui->fc_status_label != NULL) {
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
+                           ui->fc_series.count == 0
+                               ? "No sessions loaded."
+                               : "Session removed.");
+    }
+}
+
+static void on_fc_remove_all_clicked(GtkButton *button, gpointer user_data)
+{
+    Ui *ui = (Ui *)user_data;
+
+    (void)button;
+    fsl_clear(&ui->fc_series);
+    fc_refresh_store(ui, -1);
+    fc_show_session(ui, -1);
+    if (ui->fc_status_label != NULL) {
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
+                           "All sessions removed.");
+    }
+}
+
+/* --- Analysis pane ------------------------------------------------------ */
+
+static void fc_show_report(Ui *ui)
+{
+    const char *text = NULL;
+    GtkTextBuffer *buf;
+
+    if (ui->fc_report_view == NULL) return;
+    switch (ui->fc_report_format) {
+    case 1: text = ui->fc_report_markdown; break;
+    case 2: text = ui->fc_report_html; break;
+    default: text = ui->fc_report_text; break;
+    }
+    buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(ui->fc_report_view));
+    gtk_text_buffer_set_text(buf, text != NULL ? text : "", -1);
+}
+
+static gboolean fc_deliver(gpointer data)
+{
+    FcJob *job = (FcJob *)data;
+    Ui *ui;
+
+    if (job == NULL) return G_SOURCE_REMOVE;
+    ui = job->ui;
+    if (ui != NULL && ui->fc_job == job) ui->fc_job = NULL;
+    if (ui == NULL || job->cancelled) {
+        free(job->text);
+        free(job->markdown);
+        free(job->html);
+        fsl_clear(&job->snapshot);
+        free(job);
+        return G_SOURCE_REMOVE;
+    }
+    if (job->err[0] != '\0') {
+        if (ui->fc_status_label != NULL) {
+            gtk_label_set_text(GTK_LABEL(ui->fc_status_label), job->err);
+        }
+    } else {
+        free(ui->fc_report_text);
+        free(ui->fc_report_markdown);
+        free(ui->fc_report_html);
+        ui->fc_report_text = job->text;
+        ui->fc_report_markdown = job->markdown;
+        ui->fc_report_html = job->html;
+        job->text = job->markdown = job->html = NULL;
+        fc_show_report(ui);
+        if (ui->fc_status_label != NULL) {
+            char text[256];
+
+            snprintf(text, sizeof(text),
+                     "Analysis complete: %zu DAG node(s), %.3f s.",
+                     job->nodes, job->elapsed_s);
+            gtk_label_set_text(GTK_LABEL(ui->fc_status_label), text);
+        }
+        if (ui->fc_report_save_btn != NULL) {
+            gtk_widget_set_sensitive(ui->fc_report_save_btn, TRUE);
+        }
+    }
+    if (ui->fc_progress != NULL) gtk_widget_set_visible(ui->fc_progress, FALSE);
+    if (ui->fc_analyze_btn != NULL) {
+        gtk_widget_set_sensitive(ui->fc_analyze_btn, TRUE);
+    }
+    free(job->text);
+    free(job->markdown);
+    free(job->html);
+    fsl_clear(&job->snapshot);
+    free(job);
+    return G_SOURCE_REMOVE;
+}
+
+static gpointer fc_worker(gpointer data)
+{
+    FcJob *job = (FcJob *)data;
+    char err[256] = "";
+    FcRun *run = fc_dag_run(&job->snapshot, err, sizeof(err));
+
+    if (run == NULL) {
+        snprintf(job->err, sizeof(job->err), "%s",
+                 err[0] != '\0' ? err : "analysis failed");
+    } else {
+        job->nodes = run->count;
+        job->elapsed_s = run->elapsed_s;
+        fc_dag_report(&job->snapshot, run, &job->text, &job->markdown,
+                      &job->html);
+        fc_dag_free(run);
+    }
+    g_idle_add(fc_deliver, job);
+    return NULL;
+}
+
+static void on_fc_analyze_clicked(GtkButton *button, gpointer user_data)
+{
+    Ui *ui = (Ui *)user_data;
+    FcJob *job;
+
+    (void)button;
+    if (ui->fc_job != NULL) return;   /* already running */
+    job = calloc(1, sizeof(*job));
+    if (job == NULL) {
+        if (ui->fc_status_label != NULL) {
+            gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
+                               "Out of memory starting the analysis.");
+        }
+        return;
+    }
+    job->ui = ui;
+    if (!fsl_clone(&ui->fc_series, &job->snapshot)) {
+        fsl_clear(&job->snapshot);
+        free(job);
+        if (ui->fc_status_label != NULL) {
+            gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
+                               "Out of memory copying the sessions.");
+        }
+        return;
+    }
+    ui->fc_job = job;
+    if (ui->fc_status_label != NULL) {
+        char text[256];
+
+        snprintf(text, sizeof(text),
+                 "Running the analysis DAG over %zu session%s (%zu "
+                 "measurements)…", ui->fc_series.count,
+                 ui->fc_series.count == 1 ? "" : "s",
+                 fsl_total_points(&ui->fc_series));
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label), text);
+    }
+    if (ui->fc_progress != NULL) gtk_widget_set_visible(ui->fc_progress, TRUE);
+    if (ui->fc_analyze_btn != NULL) {
+        gtk_widget_set_sensitive(ui->fc_analyze_btn, FALSE);
+    }
+    if (g_thread_try_new("fc-analysis", fc_worker, job, NULL) == NULL) {
+        ui->fc_job = NULL;
+        fsl_clear(&job->snapshot);
+        free(job);
+        if (ui->fc_status_label != NULL) {
+            gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
+                               "Cannot start the analysis thread.");
+        }
+        if (ui->fc_progress != NULL) {
+            gtk_widget_set_visible(ui->fc_progress, FALSE);
+        }
+        if (ui->fc_analyze_btn != NULL) {
+            gtk_widget_set_sensitive(ui->fc_analyze_btn, TRUE);
+        }
+    }
+}
+
+static void on_fc_report_format_changed(GtkComboBox *combo, gpointer user_data)
+{
+    Ui *ui = (Ui *)user_data;
+    int idx = gtk_combo_box_get_active(combo);
+
+    ui->fc_report_format = (idx >= 0 && idx <= 2) ? idx : 0;
+    fc_show_report(ui);
+}
+
+static void on_fc_save_report(GtkButton *button, gpointer user_data)
+{
+    Ui *ui = (Ui *)user_data;
+    GtkWidget *dialog;
+    const char *text;
+    const char *ext;
+
+    (void)button;
+    switch (ui->fc_report_format) {
+    case 1: text = ui->fc_report_markdown; ext = "md"; break;
+    case 2: text = ui->fc_report_html; ext = "html"; break;
+    default: text = ui->fc_report_text; ext = "txt"; break;
+    }
+    if (text == NULL) return;
+    dialog = gtk_file_chooser_dialog_new(
+        "Save frequency-counter report", GTK_WINDOW(ui->window),
+        GTK_FILE_CHOOSER_ACTION_SAVE, "Cancel", GTK_RESPONSE_CANCEL, "Save",
+        GTK_RESPONSE_ACCEPT, NULL);
+    gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dialog), "fc_report.txt");
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(
+            dialog));
+        FILE *f = filename != NULL ? fopen(filename, "wb") : NULL;
+
+        if (f != NULL) {
+            fwrite(text, 1, strlen(text), f);
+            fclose(f);
+            if (ui->fc_status_label != NULL) {
+                char msg[512];
+
+                snprintf(msg, sizeof(msg), "Report saved: %s", filename);
+                gtk_label_set_text(GTK_LABEL(ui->fc_status_label), msg);
+            }
+        } else if (ui->fc_status_label != NULL) {
+            char msg[512];
+
+            snprintf(msg, sizeof(msg), "Cannot write %s",
+                     filename != NULL ? filename : "(null)");
+            gtk_label_set_text(GTK_LABEL(ui->fc_status_label), msg);
+        }
+        g_free(filename);
+    }
+    gtk_widget_destroy(dialog);
+    (void)ext;
+}
+
+/* --- the page ----------------------------------------------------------- */
+
+static GtkWidget *build_fc_left_panel(Ui *ui)
+{
+    GtkWidget *left = gtk_box_new(GTK_ORIENTATION_VERTICAL, PAGE_SPACING);
+    GtkWidget *toolbar = gtk_flow_box_new();
+    GtkWidget *scroll = gtk_scrolled_window_new(NULL, NULL);
+    GtkWidget *frame = gtk_frame_new("Session properties");
+    GtkWidget *grid = gtk_grid_new();
+    GtkWidget *properties;
+
+    gtk_widget_set_margin_start(left, PAGE_MARGIN);
+    gtk_widget_set_margin_end(left, PAGE_MARGIN);
+    gtk_widget_set_margin_top(left, PAGE_MARGIN);
+    gtk_widget_set_margin_bottom(left, PAGE_MARGIN);
+
+    /* toolbar: load / remove / remove all */
+    gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(toolbar), GTK_SELECTION_NONE);
+    gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(toolbar), PAGE_SPACING);
+    {
+        GtkWidget *load_btn = gtk_button_new_with_label("Load session…");
+        GtkWidget *rm = gtk_button_new_with_label("Remove session");
+        GtkWidget *rm_all = gtk_button_new_with_label("Remove all");
+
+        gtk_widget_set_tooltip_text(load_btn,
+                                    "Load one or more measurement files "
+                                    "(one frequency in Hz per line)");
+        g_signal_connect(load_btn, "clicked",
+                         G_CALLBACK(on_fc_load_clicked), ui);
+        g_signal_connect(rm, "clicked", G_CALLBACK(on_fc_remove_clicked), ui);
+        g_signal_connect(rm_all, "clicked",
+                         G_CALLBACK(on_fc_remove_all_clicked), ui);
+        ui->fc_remove_btn = rm;
+        ui->fc_remove_all_btn = rm_all;
+        gtk_flow_box_insert(GTK_FLOW_BOX(toolbar), load_btn, -1);
+        gtk_flow_box_insert(GTK_FLOW_BOX(toolbar), rm, -1);
+        gtk_flow_box_insert(GTK_FLOW_BOX(toolbar), rm_all, -1);
+    }
+    gtk_box_pack_start(GTK_BOX(left), toolbar, FALSE, FALSE, 0);
+
+    /* session list */
+    ui->fc_store = gtk_list_store_new(FC_COL_COUNT, G_TYPE_STRING,
+                                      G_TYPE_STRING, G_TYPE_STRING,
+                                      G_TYPE_STRING, G_TYPE_STRING);
+    ui->fc_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(ui->fc_store));
+    gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(ui->fc_view), TRUE);
+    {
+        static const char *titles[FC_COL_COUNT] = {
+            "Session", "Date / time", "Location", "Points", "Notes"
+        };
+
+        for (int i = 0; i < FC_COL_COUNT; i++) {
+            GtkCellRenderer *r = gtk_cell_renderer_text_new();
+            GtkTreeViewColumn *c;
+            char title[32];
+
+            snprintf(title, sizeof(title), "%s", titles[i]);
+            c = gtk_tree_view_column_new_with_attributes(title, r, "text", i,
+                                                         NULL);
+            gtk_tree_view_column_set_resizable(c, TRUE);
+            gtk_tree_view_append_column(GTK_TREE_VIEW(ui->fc_view), c);
+        }
+    }
+    gtk_widget_set_size_request(ui->fc_view, -1, 200);
+    gtk_container_add(GTK_CONTAINER(scroll), ui->fc_view);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_box_pack_start(GTK_BOX(left), scroll, TRUE, TRUE, 0);
+    g_signal_connect(gtk_tree_view_get_selection(GTK_TREE_VIEW(ui->fc_view)),
+                     "changed", G_CALLBACK(on_fc_selection_changed), ui);
+
+    /* property editor for the selected session */
+    gtk_grid_set_row_spacing(GTK_GRID(grid), 4);
+    gtk_grid_set_column_spacing(GTK_GRID(grid), 8);
+    gtk_widget_set_margin_start(grid, PAGE_MARGIN);
+    gtk_widget_set_margin_end(grid, PAGE_MARGIN);
+    gtk_widget_set_margin_top(grid, PAGE_MARGIN);
+    gtk_widget_set_margin_bottom(grid, PAGE_MARGIN);
+    {
+        static const char *labels[] = {"Label:", "Latitude:", "Longitude:",
+                                       "Date / time:", "Notes:"};
+        GtkWidget **entries[] = {&ui->fc_label_entry, &ui->fc_lat_entry,
+                                 &ui->fc_lon_entry, &ui->fc_datetime_entry,
+                                 &ui->fc_notes_entry};
+
+        for (int i = 0; i < 5; i++) {
+            GtkWidget *l = gtk_label_new(labels[i]);
+
+            gtk_widget_set_halign(l, GTK_ALIGN_START);
+            gtk_grid_attach(GTK_GRID(grid), l, 0, i, 1, 1);
+            *entries[i] = gtk_entry_new();
+            gtk_widget_set_hexpand(*entries[i], TRUE);
+            gtk_grid_attach(GTK_GRID(grid), *entries[i], 1, i, 1, 1);
+            g_signal_connect(*entries[i], "changed",
+                             G_CALLBACK(on_fc_meta_changed), ui);
+        }
+    }
+    gtk_container_add(GTK_CONTAINER(frame), grid);
+    properties = frame;
+    gtk_box_pack_start(GTK_BOX(left), properties, FALSE, FALSE, 0);
+    return left;
+}
+
+static GtkWidget *build_fc_analysis_page(Ui *ui)
 {
     GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, PAGE_SPACING);
+    GtkWidget *toolbar = gtk_flow_box_new();
+    GtkWidget *scroll = gtk_scrolled_window_new(NULL, NULL);
 
-    (void)ui;
-    gtk_widget_set_margin_start(page, PAGE_MARGIN * 2);
-    gtk_widget_set_margin_end(page, PAGE_MARGIN * 2);
-    gtk_widget_set_margin_top(page, PAGE_MARGIN * 2);
-    gtk_widget_set_margin_bottom(page, PAGE_MARGIN * 2);
+    gtk_widget_set_margin_start(page, PAGE_MARGIN);
+    gtk_widget_set_margin_end(page, PAGE_MARGIN);
+    gtk_widget_set_margin_top(page, PAGE_MARGIN);
+    gtk_widget_set_margin_bottom(page, PAGE_MARGIN);
+    gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(toolbar), GTK_SELECTION_NONE);
+    gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(toolbar), PAGE_SPACING);
+    ui->fc_analyze_btn = gtk_button_new_with_label("Analyze");
+    gtk_widget_set_tooltip_text(ui->fc_analyze_btn,
+                                "Run the frequency-counter analysis DAG "
+                                "over the loaded sessions");
+    g_signal_connect(ui->fc_analyze_btn, "clicked",
+                     G_CALLBACK(on_fc_analyze_clicked), ui);
+    gtk_flow_box_insert(GTK_FLOW_BOX(toolbar), ui->fc_analyze_btn, -1);
+    ui->fc_report_format_combo = gtk_combo_box_text_new();
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(ui->fc_report_format_combo),
+                                   "Text");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(ui->fc_report_format_combo),
+                                   "Markdown");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(ui->fc_report_format_combo),
+                                   "HTML");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(ui->fc_report_format_combo), 0);
+    g_signal_connect(ui->fc_report_format_combo, "changed",
+                     G_CALLBACK(on_fc_report_format_changed), ui);
+    gtk_flow_box_insert(GTK_FLOW_BOX(toolbar), ui->fc_report_format_combo, -1);
+    ui->fc_report_save_btn = gtk_button_new_with_label("Save report");
+    gtk_widget_set_sensitive(ui->fc_report_save_btn, FALSE);
+    g_signal_connect(ui->fc_report_save_btn, "clicked",
+                     G_CALLBACK(on_fc_save_report), ui);
+    gtk_flow_box_insert(GTK_FLOW_BOX(toolbar), ui->fc_report_save_btn, -1);
+    gtk_box_pack_start(GTK_BOX(page), toolbar, FALSE, FALSE, 0);
+
+    ui->fc_status_label = gtk_label_new("No sessions loaded.");
+    gtk_label_set_xalign(GTK_LABEL(ui->fc_status_label), 0.0);
+    gtk_label_set_line_wrap(GTK_LABEL(ui->fc_status_label), TRUE);
+    gtk_label_set_ellipsize(GTK_LABEL(ui->fc_status_label),
+                            PANGO_ELLIPSIZE_END);
+    gtk_box_pack_start(GTK_BOX(page), ui->fc_status_label, FALSE, FALSE, 0);
+
+    ui->fc_progress = gtk_progress_bar_new();
+    gtk_progress_bar_set_pulse_step(GTK_PROGRESS_BAR(ui->fc_progress), 0.1);
+    gtk_widget_set_visible(ui->fc_progress, FALSE);
+    gtk_box_pack_start(GTK_BOX(page), ui->fc_progress, FALSE, FALSE, 0);
+
+    ui->fc_report_view = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(ui->fc_report_view), FALSE);
+    gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(ui->fc_report_view), FALSE);
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(ui->fc_report_view),
+                                GTK_WRAP_WORD_CHAR);
+    gtk_text_view_set_monospace(GTK_TEXT_VIEW(ui->fc_report_view), TRUE);
+    gtk_container_add(GTK_CONTAINER(scroll), ui->fc_report_view);
+    gtk_box_pack_start(GTK_BOX(page), scroll, TRUE, TRUE, 0);
     return page;
+}
+
+static GtkWidget *build_freq_counter_page(Ui *ui)
+{
+    GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    GtkWidget *left = build_fc_left_panel(ui);
+    GtkWidget *right = gtk_notebook_new();
+    GtkWidget *analysis_page;
+    GtkWidget *settings_page;
+
+    analysis_page = build_fc_analysis_page(ui);
+    gtk_notebook_append_page(GTK_NOTEBOOK(right), analysis_page,
+                             gtk_label_new("Analysis"));
+    settings_page = gtk_box_new(GTK_ORIENTATION_VERTICAL, PAGE_SPACING);
+    gtk_notebook_append_page(GTK_NOTEBOOK(right), settings_page,
+                             gtk_label_new("Settings"));
+    gtk_paned_pack1(GTK_PANED(paned), left, TRUE, FALSE);
+    gtk_paned_pack2(GTK_PANED(paned), right, FALSE, FALSE);
+    gtk_paned_set_position(GTK_PANED(paned), 520);
+    fsl_init(&ui->fc_series);
+    fc_refresh_store(ui, -1);
+    fc_show_session(ui, -1);
+    return paned;
 }
 
 /* --- dock pane: labels, floating window, initial width ------------------ */
@@ -7836,6 +8490,17 @@ void ui_cleanup(Ui *ui)
         rb_destroy(ui->renderbuf);
         ui->renderbuf = NULL;
     }
+    if (ui->fc_job != NULL) {
+        ((FcJob *)ui->fc_job)->cancelled = 1;
+        ui->fc_job = NULL;
+    }
+    fsl_clear(&ui->fc_series);
+    free(ui->fc_report_text);
+    free(ui->fc_report_markdown);
+    free(ui->fc_report_html);
+    ui->fc_report_text = NULL;
+    ui->fc_report_markdown = NULL;
+    ui->fc_report_html = NULL;
     if (about_window != NULL) {
         gtk_widget_destroy(about_window);
         about_window = NULL;

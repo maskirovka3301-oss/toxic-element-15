@@ -138,15 +138,39 @@ Reported peaks are sub-bin refined and sorted with the fundamental
 (symbol/baud/chip rate) first. The UI shows the SCF image, the CDP plot
 with marked peaks, and the ranked cyclic feature list.
 
+## About screen
+
+**File > About** opens a modal screen whose background is the
+dark-industrial artwork with **Toxic Element 15**,
+**Daniel R. Azulay | Radio Defense** and **2026** overlaid in bold
+pale-green text with a black border. The JPEG (`media/about.jpg`) is
+converted to a C array by `tools/bin2c.c` at build time and **embedded in
+the executable**, so the screen never reads it from disk at run time; it
+closes only on an explicit user action (Escape/Return or the window's
+close button).
+
 ## Main window layout
 
 Below the menu bar the main window is a GtkNotebook with two tabs. The
 **Spectrum** tab holds the whole view - the HPaned with the waterfall +
 timeline scrollbar on the left and the dockable analysis pane on the
 right, plus the bottom toolbar and status bar. The second tab,
-**Frequency Counter**, is intentionally empty for now (a placeholder for
-controls still to be designed); selecting it changes nothing in the
-Spectrum view. The docked pane can be detached into its own window and
+**Frequency Counter**, is split by an HPaned: the left side loads series
+of frequency measurements (one frequency in Hz per line, from text files),
+keeps them in a list view and lets the user remove sessions and edit each
+session's label, location (latitude/longitude), date/time and notes; the
+right side is a notebook with an **Analysis** page (Analyze button,
+progress bar, Text/Markdown/HTML report selector, Save report and a
+read-only report view, mirroring the Selection tab) and an empty
+**Settings** page.
+
+The Analysis page is driven by `fcdag.h/.c`, a DAG backend that mirrors
+the Spectrum tab's pipeline (registry of analyses, dependency-ordered
+execution with per-node status and skip rationales, consolidated report
+rendered as text/Markdown/HTML) but operates on the loaded sessions. Its
+registry `fc_nodes[]` is currently empty on purpose: the execution
+framework runs with zero nodes and the report states that no analyses are
+implemented yet; analyses can be added to the registry later. The docked pane can be detached into its own window and
 re-attached, and its Settings tab comes last.
 
 ## Docked analysis pane
