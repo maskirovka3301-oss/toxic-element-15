@@ -8868,9 +8868,15 @@ static GtkWidget *build_fc_settings_page(Ui *ui)
     gtk_container_add(GTK_CONTAINER(frame), grid);
     gtk_box_pack_start(GTK_BOX(page), frame, FALSE, FALSE, 0);
 
-    /* which analyses to run (all checked by default) */
+    /* which analyses to run: one checkbox per DAG node, all checked by
+     * default (the registry is the single source of truth for this list) */
     {
-        GtkWidget *aframe = gtk_frame_new("Analyses to run");
+        char frame_title[96];
+        GtkWidget *aframe;
+
+        snprintf(frame_title, sizeof(frame_title),
+                 "Analyses to run (%zu DAG nodes)", fc_node_count);
+        aframe = gtk_frame_new(frame_title);
         GtkWidget *scroll = gtk_scrolled_window_new(NULL, NULL);
         GtkWidget *abox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
         GtkWidget *all_btn = gtk_button_new_with_label("Check all");
@@ -8890,6 +8896,22 @@ static GtkWidget *build_fc_settings_page(Ui *ui)
             snprintf(label, sizeof(label), "%s (%s)", fc_node_specs[i].title,
                      fc_node_specs[i].id);
             cb = gtk_check_button_new_with_label(label);
+            {
+                char tip[320];
+
+                if (fc_node_specs[i].requires != NULL &&
+                    fc_node_specs[i].requires[0] != '\0') {
+                    snprintf(tip, sizeof(tip),
+                             "Runs after: %s. Disabling this analysis skips "
+                             "its dependants too.",
+                             fc_node_specs[i].requires);
+                } else {
+                    snprintf(tip, sizeof(tip),
+                             "No prerequisite analyses; disabling it skips "
+                             "its dependants.");
+                }
+                gtk_widget_set_tooltip_text(cb, tip);
+            }
             g_object_set_data(G_OBJECT(cb), "fc-node-index",
                               GINT_TO_POINTER((int)i));
             gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(cb),

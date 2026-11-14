@@ -5464,6 +5464,20 @@ static void test_fcdag(void)
     puts("\n-- Frequency Counter analysis DAG --");
     fcd_list_init(&list);
     CHECK(fc_node_count == 21);   /* the subcarrier-lattice test chain */
+    {
+        /* every analysis in the DAG is a registry node with an executor,
+         * so the Settings checkboxes (built from the same registry) can
+         * select all of them */
+        char reg_err[192] = "";
+
+        CHECK(fc_registry_check(reg_err, sizeof(reg_err)));
+        for (size_t i = 0; i < fc_node_count; i++) {
+            CHECK(fc_node_specs[i].id != NULL &&
+                  fc_node_specs[i].id[0] != '\0');
+            CHECK(fc_node_specs[i].title != NULL &&
+                  fc_node_specs[i].title[0] != '\0');
+        }
+    }
     run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, NULL, NULL,
                              err, sizeof(err));
     CHECK(run != NULL);

@@ -182,6 +182,122 @@ const DagCoreNodeSpec fc_node_specs[] = {
 const size_t fc_node_count = sizeof(fc_node_specs) / sizeof(fc_node_specs[0]);
 
 /* ------------------------------------------------------------------ */
+/* registry integrity                                                 */
+/* ------------------------------------------------------------------ */
+
+/* Every registry node that has an executor (mdl-eigen is the documented
+ * deliberate exception: it is always skipped because frequency lists carry
+ * no signal covariance). Kept in registry order. */
+static const char *const fc_exec_ids[] = {
+    "blocks", "drift-correction", "rayleigh", "vtest", "pdm",
+    "periodogram", "chisq", "kde", "cluster", "multimodal", "correction",
+    "summary", "induced-scan", "k-dispersion", "cf-slope", "mixture-fit",
+    "model-select", "k-summary", "evidence-filter", "synthesis"
+};
+
+static bool fc_has_executor(const char *id)
+{
+    for (size_t i = 0; i < sizeof(fc_exec_ids) / sizeof(fc_exec_ids[0]); i++) {
+        if (strcmp(fc_exec_ids[i], id) == 0) return true;
+    }
+    return false;
+}
+
+static int fc_node_index(const char *id)
+{
+    for (size_t i = 0; i < fc_node_count; i++) {
+        if (strcmp(fc_node_specs[i].id, id) == 0) return (int)i;
+    }
+    return -1;
+}
+
+/* Verify the registry is a complete, well-formed description of the
+ * frequency-counter analyses: unique ids/titles, dependencies that point at
+ * earlier entries, an executor for every node except the documented MDL
+ * exception, no executor without a node, and room for every node in the
+ * Settings checkbox array. Returns true when the registry is consistent;
+ * otherwise fills `err` with the first problem. */
+bool fc_registry_check(char *err, size_t err_len)
+{
+    if (fc_node_count == 0) {
+        if (err && err_len) snprintf(err, err_len, "the registry is empty");
+        return false;
+    }
+    if (fc_node_count > FC_MAX_NODES) {
+        if (err && err_len) {
+            snprintf(err, err_len, "registry has %zu nodes but only %d "
+                     "checkbox slots", fc_node_count, FC_MAX_NODES);
+        }
+        return false;
+    }
+    for (size_t i = 0; i < fc_node_count; i++) {
+        const DagCoreNodeSpec *n = &fc_node_specs[i];
+        bool mdl = n->id != NULL && strcmp(n->id, "mdl-eigen") == 0;
+
+        if (n->id == NULL || n->id[0] == '\0' ||
+            n->title == NULL || n->title[0] == '\0') {
+            if (err && err_len) snprintf(err, err_len,
+                                         "node %zu has no id or title", i);
+            return false;
+        }
+        for (size_t j = 0; j < i; j++) {
+            if (strcmp(fc_node_specs[j].id, n->id) == 0) {
+                if (err && err_len) snprintf(err, err_len,
+                                             "duplicate node id '%s'",
+                                             n->id);
+                return false;
+            }
+        }
+        if (!mdl && !fc_has_executor(n->id)) {
+            if (err && err_len) snprintf(err, err_len,
+                                         "node '%s' has no executor", n->id);
+            return false;
+        }
+        if (mdl && fc_has_executor(n->id)) {
+            if (err && err_len) snprintf(err, err_len,
+                                         "node '%s' has an executor although "
+                                         "it is documented as always "
+                                         "skipped", n->id);
+            return false;
+        }
+        if (n->requires != NULL && n->requires[0] != '\0') {
+            char deps[256];
+            char *save = NULL;
+            char *tok;
+
+            snprintf(deps, sizeof(deps), "%s", n->requires);
+            for (tok = strtok_r(deps, ",", &save); tok != NULL;
+                 tok = strtok_r(NULL, ",", &save)) {
+                int dep = fc_node_index(tok);
+
+                if (dep < 0) {
+                    if (err && err_len) snprintf(err, err_len,
+                                                 "node '%s' requires unknown "
+                                                 "node '%s'", n->id, tok);
+                    return false;
+                }
+                if ((size_t)dep >= i) {
+                    if (err && err_len) snprintf(err, err_len,
+                                                 "node '%s' requires '%s' "
+                                                 "which does not run before "
+                                                 "it", n->id, tok);
+                    return false;
+                }
+            }
+        }
+    }
+    for (size_t i = 0; i < sizeof(fc_exec_ids) / sizeof(fc_exec_ids[0]); i++) {
+        if (fc_node_index(fc_exec_ids[i]) < 0) {
+            if (err && err_len) snprintf(err, err_len,
+                                         "executor '%s' has no registry node",
+                                         fc_exec_ids[i]);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* ------------------------------------------------------------------ */
 /* helpers                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -1760,6 +1876,17 @@ FcRun *fc_dag_run(const FcDatasetList *list, FclScope scope,
     DagCoreExec exec;
     FcRun *run;
 
+    {
+        char reg_err[192];
+
+        if (!fc_registry_check(reg_err, sizeof(reg_err))) {
+            if (err != NULL && err_len > 0) {
+                snprintf(err, err_len, "analysis registry error: %s",
+                         reg_err);
+            }
+            return NULL;
+        }
+    }
     memset(&ctx, 0, sizeof(ctx));
     ctx.list = list;
     ctx.scope = scope;

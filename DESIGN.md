@@ -172,8 +172,12 @@ read-only report view, mirroring the Selection tab) and an empty
 
 ### Subcarrier-lattice analyses
 
-The Frequency Counter analysis DAG (`fcdag.c`) runs a chain of tests over
-the loaded measurements: blocks are built per session round (all subjects
+The Frequency Counter analysis DAG (`fcdag.c`) is the single source of truth
+for the analyses: every analysis is exactly one registry node, the Settings
+tab builds its "Analyses to run" checkboxes directly from the registry (one
+checkbox per node, all checked by default, with the prerequisites in the
+tooltip), and the report renders each executed node's payload table. The
+registry runs a chain of tests over the loaded measurements: blocks are built per session round (all subjects
 combined) and per subject. The lattice tests use the candidate spacings
 5, 15, 30, 60, 120 and 240 kHz (LTE/NR numerologies plus the general 5 kHz
 case):

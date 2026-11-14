@@ -2,10 +2,13 @@
  * fcdag.h — the Frequency Counter tab's analysis DAG registry.
  *
  * The DAG engine itself is dagcore.h (shared with the Spectrum tab). This
- * module only registers the frequency-counter analyses and exposes a typed
- * runner; the algorithms are still to be defined, so the registry is empty
- * for now and the engine records every future node as skipped until an
- * executor for it exists.
+ * module registers EVERY frequency-counter analysis as one node; the
+ * registry below is the single source of truth: the Settings tab builds its
+ * per-analysis checkboxes directly from it, the runner walks it in order and
+ * the report renders each node's payload table. fc_registry_check() verifies
+ * at runtime that the registry is complete (every analysis has an executor,
+ * every executor has a node, dependencies point backwards, there is room for
+ * every node in the checkbox array).
  */
 #ifndef TE15_FCDAG_H
 #define TE15_FCDAG_H
@@ -28,6 +31,9 @@ typedef struct {
 } FcProgress;
 
 typedef DagCoreRun FcRun;
+
+/* Validate the complete registry (see above). Fills `err` on failure. */
+bool fc_registry_check(char *err, size_t err_len);
 
 /* The analysis registry (the subcarrier-lattice test chain). */
 extern const DagCoreNodeSpec fc_node_specs[];
