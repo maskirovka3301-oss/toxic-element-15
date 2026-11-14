@@ -31,12 +31,13 @@ typedef struct {
 } Sample;
 
 /* Gather the measurements of the selected lists. `only_dataset` /
- * `only_session` restrict the sample to one dataset or to one session of
- * that dataset (-1 = no restriction; session filters require a dataset).
- * Unassigned (dataset-level) measurements are only included in the
- * unrestricted sample. Returns false when there is nothing to gather. */
+ * `only_session` / `only_round` restrict the sample to one dataset, one
+ * session of that dataset or one round of that session (-1 = no
+ * restriction; deeper filters require the upper levels). Unassigned
+ * (dataset-level) measurements are only included in the unrestricted
+ * sample. Returns false when there is nothing to gather. */
 static bool sample_build(const FcDatasetList *list, long only_dataset,
-                         long only_session, Sample *out)
+                         long only_session, long only_round, Sample *out)
 {
     size_t n = 0, n_lists = 0, used = 0, used_lists = 0;
     double *v;
@@ -51,10 +52,11 @@ static bool sample_build(const FcDatasetList *list, long only_dataset,
             const FcSession *ss = &ds->sessions[s];
 
             if (only_session >= 0 && (size_t)only_session != s) continue;
-            out->rounds += ss->n_rounds;
             for (size_t r = 0; r < ss->n_rounds; r++) {
                 const FcRound *rr = &ss->rounds[r];
 
+                if (only_round >= 0 && (size_t)only_round != r) continue;
+                out->rounds++;
                 for (size_t j = 0; j < rr->n_subjects; j++) {
                     n += rr->subjects[j].count;
                     n_lists++;
@@ -85,6 +87,7 @@ static bool sample_build(const FcDatasetList *list, long only_dataset,
             for (size_t r = 0; r < ss->n_rounds; r++) {
                 const FcRound *rr = &ss->rounds[r];
 
+                if (only_round >= 0 && (size_t)only_round != r) continue;
                 for (size_t j = 0; j < rr->n_subjects; j++) {
                     const FcSubject *sj = &rr->subjects[j];
 
@@ -566,7 +569,7 @@ char *fc_stats_report(const FcDatasetList *list, FclScope scope,
         buf_add(&b, "No datasets loaded.\n");
         return b.text;
     }
-    have_all = sample_build(list, -1, -1, &all);
+    have_all = sample_build(list, -1, -1, -1, &all);
     if (!have_all) {
         buf_add(&b, "No measurements selected for the statistics.\n");
         return b.text;
@@ -585,7 +588,45 @@ char *fc_stats_report(const FcDatasetList *list, FclScope scope,
             fcl_scope_name(scope), confidence_suffix(opt.confidence),
             opt.bootstrap);
 
-    /* Per-session statistics first (checked frequency lists only). */
+    /* Per-round statistics first (checked frequency lists only). */
+    buf_add(&b, "\nPER-ROUND STATISTICS\n");
+    buf_add(&b, "====================\n");
+    {
+        size_t printed = 0;
+
+        for (size_t d = 0; d < list->count; d++) {
+            const FcDataset *ds = &list->items[d];
+
+            for (size_t s = 0; s < ds->n_sessions; s++) {
+                const FcSession *ss = &ds->sessions[s];
+
+                for (size_t r = 0; r < ss->n_rounds; r++) {
+                    const FcRound *rr = &ss->rounds[r];
+                    Sample one;
+                    char heading[640];
+
+                    if (!sample_build(list, (long)d, (long)s, (long)r,
+                                      &one)) {
+                        continue;
+                    }
+                    snprintf(heading, sizeof(heading),
+                             "Round: %s / session %s / round %s",
+                             ds->title != NULL ? ds->title
+                                               : ds->dataset_id,
+                             ss->session_id.text, rr->round_id.text);
+                    render_block(&b, &one, heading, opt.confidence,
+                                 opt.bootstrap);
+                    sample_free(&one);
+                    printed++;
+                }
+            }
+        }
+        if (printed == 0) {
+            buf_add(&b, "  (no round has selected frequency lists)\n");
+        }
+    }
+
+    /* Then the statistics per session (checked frequency lists only). */
     buf_add(&b, "\nPER-SESSION STATISTICS\n");
     buf_add(&b, "======================\n");
     {
@@ -599,7 +640,9 @@ char *fc_stats_report(const FcDatasetList *list, FclScope scope,
                 Sample one;
                 char heading[512];
 
-                if (!sample_build(list, (long)d, (long)s, &one)) continue;
+                if (!sample_build(list, (long)d, (long)s, -1, &one)) {
+                    continue;
+                }
                 snprintf(heading, sizeof(heading), "Session: %s / %s",
                          ds->title != NULL ? ds->title : ds->dataset_id,
                          ss->session_id.text);

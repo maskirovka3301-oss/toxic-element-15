@@ -322,12 +322,16 @@ copy) and shows — and can save — a text report with:
   (stability over one round) when at least two rounds contribute; a
   single-round dataset is still listed, with "n/a (needs >= 2 rounds)".
 
-The report is organised per session first: for every session that has
-checked frequency lists, a complete statistics block (descriptive, robust,
-normality, bootstrap intervals and the population estimates for that
-session's lists) is printed, and only after all session blocks follows the
-"ALL SELECTED DATA" block with the same statistics over every selected
-frequency list, plus the per-dataset round-mean/Allan-deviation table.
+The report is organised from the finest to the coarsest selection level:
+first a complete statistics block for every selected ROUND that has checked
+frequency lists ("PER-ROUND STATISTICS", heading "Round: <dataset> / session
+/ round"), then for every selected SESSION ("PER-SESSION STATISTICS"), then
+the "ALL SELECTED DATA" block with the same statistics over every selected
+frequency list, and finally the per-dataset round-mean/Allan-deviation
+table. Each block contains the descriptive and robust statistics, the
+Jarque-Bera normality diagnostic, the bootstrap confidence intervals and the
+two-level population estimates (ICC, design effect, effective n, cluster
+bootstrap) for exactly that level's checked lists.
 
 The report is rendered in `fcstats.c` (`fc_stats_report()`), which only
 reads the dataset list, so the same computation is testable without GTK.

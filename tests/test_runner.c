@@ -5735,14 +5735,24 @@ static void test_fcstats(void)
     CHECK(text != NULL);
     if (text != NULL) {
         CHECK(strstr(text, "FREQUENCY COUNTER STATISTICS") != NULL);
+        CHECK(strstr(text, "PER-ROUND STATISTICS") != NULL);
         CHECK(strstr(text, "PER-SESSION STATISTICS") != NULL);
         CHECK(strstr(text, "Session: Stats test") != NULL);
         CHECK(strstr(text, "ALL SELECTED DATA") != NULL);
+        CHECK(strstr(text, "Round: Stats test / session 1 / round r1") !=
+              NULL);
+        CHECK(strstr(text, "Round: Stats test / session 1 / round r2") !=
+              NULL);
+        /* r1 = [1..6] mean 3.5, r2 = [7,8,9] mean 8.0 */
+        CHECK(strstr(text, "3.500000") != NULL);
+        CHECK(strstr(text, "8.000000") != NULL);
         {
-            const char *per = strstr(text, "PER-SESSION STATISTICS");
+            const char *rd = strstr(text, "PER-ROUND STATISTICS");
+            const char *se = strstr(text, "PER-SESSION STATISTICS");
             const char *allb = strstr(text, "ALL SELECTED DATA");
 
-            CHECK(per != NULL && allb != NULL && per < allb);
+            CHECK(rd != NULL && se != NULL && allb != NULL);
+            CHECK(rd < se && se < allb);
         }
         CHECK(strstr(text, "measurements: 9") != NULL);
         CHECK(strstr(text, "mean              5.000000") != NULL);
@@ -5811,6 +5821,13 @@ static void test_fcstats(void)
             CHECK(strstr(text, "Two-round dataset") != NULL);
             CHECK(strstr(text, "Session: Single-round dataset") != NULL);
             CHECK(strstr(text, "Session: Two-round dataset") != NULL);
+            CHECK(strstr(text, "PER-ROUND STATISTICS") != NULL);
+            CHECK(strstr(text, "Round: Single-round dataset / session 1 / "
+                               "round r1") != NULL);
+            CHECK(strstr(text, "Round: Two-round dataset / session 1 / "
+                               "round r1") != NULL);
+            CHECK(strstr(text, "Round: Two-round dataset / session 1 / "
+                               "round r2") != NULL);
             /* each session block has its own descriptive statistics */
             CHECK(strstr(text, "10.500000") != NULL);   /* 10, 11 */
             CHECK(strstr(text, "21.500000") != NULL);   /* 20..23 */
