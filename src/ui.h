@@ -375,6 +375,7 @@ typedef struct Ui {
     GtkWidget  *fc_stats_btn;        /* "Compute statistics"            */
     GtkWidget  *fc_stats_save_btn;
     GtkWidget  *fc_stats_conf_combo; /* 90 / 95 / 99 %                  */
+    GtkWidget  *fc_stats_drift_check; /* apply warm-up drift correction  */
     char       *fc_stats_text;
     GtkWidget  *fc_report_format_combo;
     GtkWidget  *fc_report_save_btn;

@@ -9,6 +9,8 @@
  */
 #include "fcstats.h"
 
+#include "fcdrift.h"
+
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -19,6 +21,58 @@ typedef struct {
     double *v;
     size_t  n;
 } Cluster;
+
+/* Apply the device warm-up drift correction (the same fcdrift model the
+ * analysis DAG uses) to one measurement series in place. Returns true when
+ * the series was actually corrected. */
+static bool drift_correct_series(double *values, size_t n)
+{
+    FcdResult res;
+    double *corrected;
+
+    if (values == NULL || n < 8) return false;
+    if (!fcd_estimate(values, NULL, n, &res)) return false;
+    if (!res.corrected) return false;
+    corrected = malloc(n * sizeof(*corrected));
+    if (corrected == NULL) return false;
+    fcd_correct(values, NULL, n, &res, corrected);
+    memcpy(values, corrected, n * sizeof(*values));
+    free(corrected);
+    return true;
+}
+
+/* Clone the dataset list and drift-correct every frequency list's values
+ * (and the dataset-level unassigned lists). The clone owns all arrays, so
+ * the original data is untouched. Returns false on allocation failure. */
+static bool drift_correct_clone(const FcDatasetList *list,
+                                FcDatasetList *out, size_t *n_corrected)
+{
+    *n_corrected = 0;
+    if (!fcd_list_clone(list, out)) return false;
+    for (size_t d = 0; d < out->count; d++) {
+        FcDataset *ds = &out->items[d];
+
+        for (size_t s = 0; s < ds->n_sessions; s++) {
+            FcSession *ss = &ds->sessions[s];
+
+            for (size_t r = 0; r < ss->n_rounds; r++) {
+                FcRound *rr = &ss->rounds[r];
+
+                for (size_t j = 0; j < rr->n_subjects; j++) {
+                    if (drift_correct_series(rr->subjects[j].measurements,
+                                             rr->subjects[j].count)) {
+                        (*n_corrected)++;
+                    }
+                }
+            }
+        }
+        if (ds->n_unassigned > 0 &&
+            drift_correct_series(ds->unassigned, ds->n_unassigned)) {
+            (*n_corrected)++;
+        }
+    }
+    return true;
+}
 
 /* A gathered measurement sample: all checked frequency lists of a dataset
  * (and optionally only one of its sessions). */
@@ -549,6 +603,10 @@ char *fc_stats_report(const FcDatasetList *list, FclScope scope,
     FcStatsOptions opt;
     Buf b;
     Sample all;
+    FcDatasetList corrected;
+    const FcDatasetList *data = list;
+    bool have_corrected = false;
+    size_t n_corrected = 0;
     bool have_all;
     size_t sessions = 0, rounds_total = 0, lists_total = 0;
 
@@ -569,13 +627,22 @@ char *fc_stats_report(const FcDatasetList *list, FclScope scope,
         buf_add(&b, "No datasets loaded.\n");
         return b.text;
     }
-    have_all = sample_build(list, -1, -1, -1, &all);
+    if (opt.drift_correct) {
+        fcd_list_init(&corrected);
+        if (drift_correct_clone(list, &corrected, &n_corrected)) {
+            data = &corrected;
+            have_corrected = true;
+        } else {
+            fcd_list_clear(&corrected);
+        }
+    }
+    have_all = sample_build(data, -1, -1, -1, &all);
     if (!have_all) {
         buf_add(&b, "No measurements selected for the statistics.\n");
         return b.text;
     }
-    for (size_t d = 0; d < list->count; d++) {
-        sessions += list->items[d].n_sessions;
+    for (size_t d = 0; d < data->count; d++) {
+        sessions += data->items[d].n_sessions;
     }
     rounds_total = all.rounds;
     lists_total = all.k;
@@ -583,10 +650,28 @@ char *fc_stats_report(const FcDatasetList *list, FclScope scope,
     buf_add(&b, "============================\n");
     buf_add(&b, "Datasets: %zu | sessions: %zu | rounds: %zu | frequency "
                "lists: %zu | measurements: %zu\n",
-            list->count, sessions, rounds_total, lists_total, all.n);
+            data->count, sessions, rounds_total, lists_total, all.n);
     buf_add(&b, "Analysis scope: %s | confidence %s | bootstrap %zu\n",
             fcl_scope_name(scope), confidence_suffix(opt.confidence),
             opt.bootstrap);
+    if (opt.drift_correct) {
+        if (!have_corrected) {
+            buf_add(&b, "Drift correction: requested, but the datasets could "
+                        "not be copied.\n");
+        } else if (n_corrected == 0) {
+            buf_add(&b, "Drift correction: requested, but no frequency list "
+                        "had a usable warm-up drift model (the values are "
+                        "the originals).\n");
+        } else {
+            buf_add(&b, "Drift correction: applied per frequency list to %zu "
+                        "list%s (same fcdrift warm-up model as the analysis "
+                        "DAG; the corrected values are used below).\n",
+                    n_corrected, n_corrected == 1 ? "" : "s");
+        }
+    } else {
+        buf_add(&b, "Drift correction: off (statistics use the original "
+                    "measured values).\n");
+    }
 
     /* Per-round statistics first (checked frequency lists only). */
     buf_add(&b, "\nPER-ROUND STATISTICS\n");
@@ -594,8 +679,8 @@ char *fc_stats_report(const FcDatasetList *list, FclScope scope,
     {
         size_t printed = 0;
 
-        for (size_t d = 0; d < list->count; d++) {
-            const FcDataset *ds = &list->items[d];
+        for (size_t d = 0; d < data->count; d++) {
+            const FcDataset *ds = &data->items[d];
 
             for (size_t s = 0; s < ds->n_sessions; s++) {
                 const FcSession *ss = &ds->sessions[s];
@@ -605,7 +690,7 @@ char *fc_stats_report(const FcDatasetList *list, FclScope scope,
                     Sample one;
                     char heading[640];
 
-                    if (!sample_build(list, (long)d, (long)s, (long)r,
+                    if (!sample_build(data, (long)d, (long)s, (long)r,
                                       &one)) {
                         continue;
                     }
@@ -632,15 +717,15 @@ char *fc_stats_report(const FcDatasetList *list, FclScope scope,
     {
         size_t printed = 0;
 
-        for (size_t d = 0; d < list->count; d++) {
-            const FcDataset *ds = &list->items[d];
+        for (size_t d = 0; d < data->count; d++) {
+            const FcDataset *ds = &data->items[d];
 
             for (size_t s = 0; s < ds->n_sessions; s++) {
                 const FcSession *ss = &ds->sessions[s];
                 Sample one;
                 char heading[512];
 
-                if (!sample_build(list, (long)d, (long)s, -1, &one)) {
+                if (!sample_build(data, (long)d, (long)s, -1, &one)) {
                     continue;
                 }
                 snprintf(heading, sizeof(heading), "Session: %s / %s",
@@ -663,12 +748,12 @@ char *fc_stats_report(const FcDatasetList *list, FclScope scope,
     {
         size_t printed = 0;
 
-        for (size_t d = 0; d < list->count; d++) {
-            const FcDataset *ds = &list->items[d];
+        for (size_t d = 0; d < data->count; d++) {
+            const FcDataset *ds = &data->items[d];
             Sample one;
             char heading[512];
 
-            if (!sample_build(list, (long)d, -1, -1, &one)) continue;
+            if (!sample_build(data, (long)d, -1, -1, &one)) continue;
             snprintf(heading, sizeof(heading), "Dataset: %s",
                      ds->title != NULL ? ds->title : ds->dataset_id);
             render_block(&b, &one, heading, opt.confidence, opt.bootstrap);
@@ -693,8 +778,8 @@ char *fc_stats_report(const FcDatasetList *list, FclScope scope,
                     "Allan deviation\n");
         buf_add(&b, "----------------------------------------------------"
                     "------\n");
-        for (size_t d = 0; d < list->count; d++) {
-            const FcDataset *ds = &list->items[d];
+        for (size_t d = 0; d < data->count; d++) {
+            const FcDataset *ds = &data->items[d];
             double means[256];
             size_t rn = 0, idx = 0, valid = 0;
             size_t total_meas = 0;
@@ -777,5 +862,6 @@ char *fc_stats_report(const FcDatasetList *list, FclScope scope,
                 "round means is a stability measure of the device over one "
                 "round.\n");
     sample_free(&all);
+    if (have_corrected) fcd_list_clear(&corrected);
     return b.text;
 }

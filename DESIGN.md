@@ -347,6 +347,15 @@ Jarque-Bera normality diagnostic, the bootstrap confidence intervals and the
 two-level population estimates (ICC, design effect, effective n, cluster
 bootstrap) for exactly that level's checked lists.
 
+An "Apply drift correction" checkbox in the Statistics tab runs the same
+`fcdrift` warm-up model (exponential / double-exponential fit, IRLS,
+variable projection) per selected frequency list over a clone of the
+snapshot before computing the statistics: every per-round, per-session,
+per-dataset and all-data block then uses the corrected values while the
+original data stays untouched. The report header states whether the
+correction was applied (and to how many lists), was requested but had no
+usable drift model, or was off.
+
 The report is rendered in `fcstats.c` (`fc_stats_report()`), which only
 reads the dataset list, so the same computation is testable without GTK.
 The "Save statistics" button writes the report to a file like the analysis

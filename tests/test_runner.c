@@ -5932,6 +5932,82 @@ static void test_fcstats(void)
         remove(p2);
     }
 
+    /* drift-corrected statistics: the optional fcdrift warm-up correction
+     * is applied per frequency list before the statistics */
+    {
+        static const char *pdrift = "/tmp/te15_stats_drift.json";
+        char json[16384];
+        size_t pos = 0;
+        FcDatasetList dlist;
+        FcStatsOptions dop;
+        char *off_text, *on_text;
+        double off_mean = 0.0, on_mean = 0.0;
+        FILE *df;
+
+        pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
+                                "{ \"dataset_id\": \"drift\", "
+                                "\"source_file\": \"d.csv\", "
+                                "\"title\": \"Drift test\", \"notes\": [], "
+                                "\"sessions\": [ { \"session_id\": 1, "
+                                "\"rounds\": [ { \"round_id\": \"r1\", "
+                                "\"location\": null, \"date\": null, "
+                                "\"coordinates\": null, "
+                                "\"closest_towers_enb_ids\": null, "
+                                "\"context\": null, "
+                                "\"subjects_listed\": [], \"subjects\": [ "
+                                "{\"name\": \"a\", \"measurements\": [");
+        for (int i = 0; i < 200; i++) {
+            unsigned long h = (unsigned long)i * 2654435761ul;
+            double noise = 1.0 * ((double)(h % 1000) / 1000.0 - 0.5);
+            double v = 1000.0 + 200.0 * exp(-(double)i / 25.0) + noise;
+
+            pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
+                                    "%s%.4f", i > 0 ? ", " : "", v);
+        }
+        snprintf(json + pos, sizeof(json) - pos,
+                 "] } ] } ] } ], \"unassigned_measurements\": [] }\n");
+        df = fopen(pdrift, "w");
+        CHECK(df != NULL);
+        if (df != NULL) { fputs(json, df); fclose(df); }
+        fcd_list_init(&dlist);
+        CHECK(fcd_load_file(&dlist, pdrift, NULL, 0));
+        memset(&dop, 0, sizeof(dop));
+        dop.confidence = 95;
+        dop.bootstrap = 300;
+        dop.per_round = false;
+        dop.drift_correct = false;
+        off_text = fc_stats_report(&dlist, FCL_SCOPE_PER_DATASET, &dop);
+        CHECK(off_text != NULL && strstr(off_text, "Drift correction: off") !=
+              NULL);
+        if (off_text != NULL) {
+            const char *m = strstr(off_text, "  mean              ");
+
+            CHECK(m != NULL);
+            if (m != NULL) sscanf(m, "  mean              %lf", &off_mean);
+            free(off_text);
+        }
+        dop.drift_correct = true;
+        on_text = fc_stats_report(&dlist, FCL_SCOPE_PER_DATASET, &dop);
+        CHECK(on_text != NULL);
+        if (on_text != NULL) {
+            const char *m;
+
+            CHECK(strstr(on_text, "Drift correction: applied per frequency "
+                                  "list") != NULL);
+            m = strstr(on_text, "  mean              ");
+            CHECK(m != NULL);
+            if (m != NULL) sscanf(m, "  mean              %lf", &on_mean);
+            free(on_text);
+        }
+        printf("  drift means: raw %.3f -> corrected %.3f\n", off_mean,
+               on_mean);
+        /* the decaying warm-up term lifts the raw mean by ~25 Hz */
+        CHECK(off_mean > on_mean + 15.0);
+        CHECK(fabs(on_mean - 1000.0) < 10.0);
+        fcd_list_clear(&dlist);
+        remove(pdrift);
+    }
+
     text = fc_stats_report(NULL, FCL_SCOPE_PER_DATASET, NULL);
     CHECK(text != NULL && strstr(text, "No datasets loaded") != NULL);
     free(text);

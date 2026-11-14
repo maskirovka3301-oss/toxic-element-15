@@ -10401,6 +10401,9 @@ static void on_fc_stats_clicked(GtkButton *button, gpointer user_data)
     opt.confidence = conf;
     opt.bootstrap = 1000;
     opt.per_round = true;
+    opt.drift_correct = ui->fc_stats_drift_check != NULL &&
+                        gtk_toggle_button_get_active(
+                            GTK_TOGGLE_BUTTON(ui->fc_stats_drift_check));
     text = fc_stats_report(&snap, (FclScope)ui->fc_scope, &opt);
     fcd_list_clear(&snap);
     if (text == NULL) {
@@ -10492,6 +10495,15 @@ static GtkWidget *build_fc_statistics_page(Ui *ui)
         gtk_flow_box_insert(GTK_FLOW_BOX(toolbar),
                             ui->fc_stats_conf_combo, -1);
     }
+    ui->fc_stats_drift_check = gtk_check_button_new_with_label(
+        "Apply drift correction");
+    gtk_widget_set_tooltip_text(
+        ui->fc_stats_drift_check,
+        "Estimate and remove the device warm-up drift (the same fcdrift "
+        "model the analysis DAG uses) on every selected frequency list "
+        "before computing the statistics");
+    gtk_flow_box_insert(GTK_FLOW_BOX(toolbar),
+                        ui->fc_stats_drift_check, -1);
     ui->fc_stats_save_btn = gtk_button_new_with_label("Save statistics");
     gtk_widget_set_sensitive(ui->fc_stats_save_btn, FALSE);
     g_signal_connect(ui->fc_stats_save_btn, "clicked",

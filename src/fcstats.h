@@ -21,6 +21,7 @@ typedef struct {
     int    confidence;   /* 90, 95 or 99 (percent)                 */
     size_t bootstrap;    /* resampling replicates (>= 200)         */
     bool   per_round;    /* include the per-round descriptive table */
+    bool   drift_correct;/* statistics on drift-corrected values   */
 } FcStatsOptions;
 
 /* Fill `*out` with a newly allocated text report (free with free()); NULL
