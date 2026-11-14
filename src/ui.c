@@ -6434,13 +6434,15 @@ static gboolean draw_peak_pane(GtkWidget *widget, cairo_t *cr, gpointer user_dat
     }
     {
         double pw = peak_plot_w(w);
-        /* The shading follows the sliders live (every value change), unlike
-         * the waterfall colour scheme which commits on release. Auto mode
-         * shades the auto window. */
-        double sel_lo = MIN(ui->auto_scale ? ui->wf_range_lo : ui->db_min,
-                            ui->auto_scale ? ui->wf_range_hi : ui->db_max);
-        double sel_hi = MAX(ui->auto_scale ? ui->wf_range_lo : ui->db_min,
-                            ui->auto_scale ? ui->wf_range_hi : ui->db_max);
+        /* The shaded areas always follow the dB SLIDERS (live, on every
+         * value change), never the automatic range: at startup the sliders
+         * sit at the extremes of the allowed range (min dB = -150,
+         * max dB = +40), so the selected window covers the whole axis and
+         * no blue shading is visible. Auto only affects the waterfall's
+         * colour range; it does not change the selection the peak view
+         * shades. */
+        double sel_lo = MIN(ui->db_min, ui->db_max);
+        double sel_hi = MAX(ui->db_min, ui->db_max);
         double axis_lo = ui->peak_db_lo;
         double axis_hi = ui->peak_db_hi;
         double step = peak_tick_step(axis_lo, axis_hi);
