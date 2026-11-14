@@ -166,17 +166,6 @@ typedef struct Ui {
                                  * waterfall) */
     GtkWidget *dock_box;        /* dock header + notebook                */
     GtkWidget *dock_paned;      /* the HPaned holding the waterfall + dock */
-#define DOCK_MAX_PAGES 8
-    GtkWidget *dock_page_views[DOCK_MAX_PAGES];   /* notebook pages      */
-    char       dock_page_titles[DOCK_MAX_PAGES][64];
-    int        dock_page_order[DOCK_MAX_PAGES];   /* stable tab order    */
-    GtkWidget *dock_page_windows[DOCK_MAX_PAGES]; /* detached windows    */
-    bool       dock_page_detached[DOCK_MAX_PAGES];
-    int        dock_page_count;
-    GtkWidget *dock_detach_btn; /* detaches the current tab               */
-    GtkWidget *dock_hint_label; /* "drop here to attach" hint             */
-    guint      dock_hover_timer;/* hover-to-attach timeout               */
-    int        dock_hover_page; /* detach candidate while hovering       */
     bool       dock_pos_initialised; /* default width already applied   */
 
     /* Demod page (live: follows the current selection) */
