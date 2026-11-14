@@ -340,6 +340,16 @@ typedef struct Ui {
      * dataset -> session -> round -> subject order */
     bool         *fc_subject_analyze;
     size_t        fc_subject_flags_capacity;
+    /* global subject filter above the tree: unique subject names, each with
+     * a checkbox that switches every occurrence in the tree at once */
+    GtkWidget   *fc_subject_scroll;
+    GtkWidget   *fc_subject_box;
+    char       **fc_subject_names;
+    bool        *fc_subject_enabled;
+    GtkWidget  **fc_subject_checks;
+    size_t       fc_subject_name_count;
+    size_t       fc_subject_name_cap;
+    bool         fc_subject_guard;
     /* saved child-selection masks: reselecting a parent restores exactly
      * the children that were selected before the parent was deselected */
     void         *fc_hist;

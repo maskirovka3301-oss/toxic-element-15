@@ -20,78 +20,111 @@ typedef struct {
     size_t  n;
 } Cluster;
 
-static double *copy_values(const FcDatasetList *list, size_t *n_out,
-                           Cluster **clusters_out, size_t *n_clusters_out,
-                           size_t *rounds_out)
-{
-    size_t n = 0, n_lists = 0, n_rounds = 0;
+/* A gathered measurement sample: all checked frequency lists of a dataset
+ * (and optionally only one of its sessions). */
+typedef struct {
     double *v;
     Cluster *cl;
-    size_t used = 0, used_lists = 0;
+    size_t  n;
+    size_t  k;        /* number of frequency lists (clusters) */
+    size_t  rounds;
+} Sample;
 
+/* Gather the measurements of the selected lists. `only_dataset` /
+ * `only_session` restrict the sample to one dataset or to one session of
+ * that dataset (-1 = no restriction; session filters require a dataset).
+ * Unassigned (dataset-level) measurements are only included in the
+ * unrestricted sample. Returns false when there is nothing to gather. */
+static bool sample_build(const FcDatasetList *list, long only_dataset,
+                         long only_session, Sample *out)
+{
+    size_t n = 0, n_lists = 0, used = 0, used_lists = 0;
+    double *v;
+    Cluster *cl;
+
+    memset(out, 0, sizeof(*out));
     for (size_t d = 0; d < list->count; d++) {
         const FcDataset *ds = &list->items[d];
 
+        if (only_dataset >= 0 && (size_t)only_dataset != d) continue;
         for (size_t s = 0; s < ds->n_sessions; s++) {
             const FcSession *ss = &ds->sessions[s];
 
+            if (only_session >= 0 && (size_t)only_session != s) continue;
+            out->rounds += ss->n_rounds;
             for (size_t r = 0; r < ss->n_rounds; r++) {
                 const FcRound *rr = &ss->rounds[r];
 
-                n_rounds++;
                 for (size_t j = 0; j < rr->n_subjects; j++) {
                     n += rr->subjects[j].count;
                     n_lists++;
                 }
             }
         }
-        n += ds->n_unassigned;
-        if (ds->n_unassigned > 0) n_lists++;
+        if (only_session < 0 && ds->n_unassigned > 0) {
+            n += ds->n_unassigned;
+            n_lists++;
+        }
     }
-    if (n == 0) return NULL;
+    if (n == 0) return false;
     v = malloc(n * sizeof(*v));
-    cl = calloc(n_lists, sizeof(*cl));
+    cl = calloc(n_lists > 0 ? n_lists : 1, sizeof(*cl));
     if (v == NULL || cl == NULL) {
         free(v);
         free(cl);
-        return NULL;
+        return false;
     }
     for (size_t d = 0; d < list->count; d++) {
         const FcDataset *ds = &list->items[d];
 
+        if (only_dataset >= 0 && (size_t)only_dataset != d) continue;
         for (size_t s = 0; s < ds->n_sessions; s++) {
             const FcSession *ss = &ds->sessions[s];
 
+            if (only_session >= 0 && (size_t)only_session != s) continue;
             for (size_t r = 0; r < ss->n_rounds; r++) {
                 const FcRound *rr = &ss->rounds[r];
 
                 for (size_t j = 0; j < rr->n_subjects; j++) {
                     const FcSubject *sj = &rr->subjects[j];
 
-                    if (sj->count > 0) {
-                        cl[used_lists].v = sj->measurements;
-                        cl[used_lists].n = sj->count;
-                        memcpy(v + used, sj->measurements,
-                               sj->count * sizeof(*v));
-                        used += sj->count;
-                        used_lists++;
-                    }
+                    if (sj->count == 0) continue;
+                    cl[used_lists].v = sj->measurements;
+                    cl[used_lists].n = sj->count;
+                    memcpy(v + used, sj->measurements,
+                           sj->count * sizeof(*v));
+                    used += sj->count;
+                    used_lists++;
                 }
             }
         }
-        if (ds->n_unassigned > 0) {
+        if (only_session < 0 && ds->n_unassigned > 0) {
             cl[used_lists].v = ds->unassigned;
             cl[used_lists].n = ds->n_unassigned;
-            memcpy(v + used, ds->unassigned, ds->n_unassigned * sizeof(*v));
+            memcpy(v + used, ds->unassigned,
+                   ds->n_unassigned * sizeof(*v));
             used += ds->n_unassigned;
             used_lists++;
         }
     }
-    *n_out = n;
-    *clusters_out = cl;
-    *n_clusters_out = used_lists;
-    *rounds_out = n_rounds;
-    return v;
+    out->v = v;
+    out->cl = cl;
+    out->n = used;
+    out->k = used_lists;
+    if (out->n == 0) {
+        free(v);
+        free(cl);
+        memset(out, 0, sizeof(*out));
+        return false;
+    }
+    return true;
+}
+
+static void sample_free(Sample *s)
+{
+    free(s->v);
+    free(s->cl);
+    memset(s, 0, sizeof(*s));
 }
 
 static int cmp_double(const void *a, const void *b)
@@ -414,21 +447,107 @@ static const char *confidence_suffix(int confidence)
     return "95%";
 }
 
+/* Render one complete statistics block (descriptive, normality, bootstrap
+ * and population sections) for a gathered sample. */
+static void render_block(Buf *b, const Sample *s, const char *heading,
+                         int confidence, size_t bootstrap)
+{
+    const double *v = s->v;
+    const Cluster *cl = s->cl;
+    size_t n = s->n, k = s->k;
+    double conf = 1.0 - (1.0 - (double)confidence / 100.0);
+    FclRng rng;
+    double mean, sd, se, med, mad, trimmed, skew, kurt, jb, jb_p;
+    double mean_lo, mean_hi, med_lo, med_hi, sd_lo, sd_hi;
+    double trim_lo, trim_hi, cluster_lo = 0.0, cluster_hi = 0.0;
+    double sigma_b2 = 0.0, sigma_w2 = 0.0, icc = 0.0, deff = 1.0, n_eff = 0.0;
+    double *sorted = NULL;
+
+    fcl_rng_seed(&rng, 0x5EED5EEDULL);
+    mean = mean_of(v, n);
+    sd = sqrt(var_of(v, n, mean));
+    se = n > 0 ? sd / sqrt((double)n) : 0.0;
+    {
+        double *tmp = malloc(n * sizeof(*tmp));
+
+        if (tmp != NULL) {
+            memcpy(tmp, v, n * sizeof(*tmp));
+            qsort(tmp, n, sizeof(*tmp), cmp_double);
+            sorted = tmp;
+        }
+    }
+    med = sorted != NULL ? median_sorted(sorted, n) : mean;
+    mad = sorted != NULL ? mad_sorted(sorted, n, med) * 1.4826 : 0.0;
+    trimmed = sorted != NULL ? trimmed_mean(sorted, n, 0.1) : mean;
+    skew = skewness(v, n, mean, sd);
+    kurt = kurtosis_excess(v, n, mean, sd);
+    jb = n > 2 ? (double)n / 6.0 * (skew * skew + kurt * kurt / 4.0) : 0.0;
+    jb_p = fcl_chi2_p(jb, 2);
+    bootstrap_ci(v, n, stat_mean, bootstrap, conf, &rng, &mean_lo, &mean_hi);
+    bootstrap_ci(v, n, stat_median, bootstrap, conf, &rng, &med_lo,
+                 &med_hi);
+    bootstrap_ci(v, n, stat_sd, bootstrap, conf, &rng, &sd_lo, &sd_hi);
+    bootstrap_ci(v, n, stat_trimmed, bootstrap, conf, &rng, &trim_lo,
+                 &trim_hi);
+    variance_components(cl, k, n, mean, &sigma_b2, &sigma_w2, &icc, &deff,
+                        &n_eff);
+    cluster_bootstrap_mean(cl, k, bootstrap, conf, &rng, &cluster_lo,
+                           &cluster_hi);
+
+    buf_add(b, "\n%s\n", heading);
+    buf_add(b, "-----------------------------------------------------------------"
+               "---\n");
+    buf_add(b, "  n %zu | frequency lists %zu | rounds %zu\n", n, k,
+            s->rounds);
+    buf_add(b, "  mean              %.6f\n", mean);
+    buf_add(b, "  standard error    %.6f\n", se);
+    buf_add(b, "  std. deviation    %.6f\n", sd);
+    buf_add(b, "  minimum           %.6f\n", sorted != NULL ? sorted[0] : 0.0);
+    buf_add(b, "  Q1                %.6f\n",
+            sorted != NULL ? quantile_sorted(sorted, n, 0.25) : 0.0);
+    buf_add(b, "  median            %.6f\n", med);
+    buf_add(b, "  Q3                %.6f\n",
+            sorted != NULL ? quantile_sorted(sorted, n, 0.75) : 0.0);
+    buf_add(b, "  maximum           %.6f\n",
+            sorted != NULL ? sorted[n - 1] : 0.0);
+    buf_add(b, "  IQR               %.6f\n",
+            sorted != NULL ? quantile_sorted(sorted, n, 0.75) -
+                                 quantile_sorted(sorted, n, 0.25) : 0.0);
+    buf_add(b, "  MAD (scaled)      %.6f\n", mad);
+    buf_add(b, "  10%% trimmed mean  %.6f\n", trimmed);
+    buf_add(b, "  skewness          %.4f\n", skew);
+    buf_add(b, "  excess kurtosis   %.4f\n", kurt);
+    buf_add(b, "  Jarque-Bera       %.4f (chi2 df=2, p = %.4g) -> %s\n",
+            jb, jb_p,
+            jb_p < 0.05 ? "non-normal tails/skew"
+                        : "consistent with a normal distribution");
+    buf_add(b, "  mean %s CI       [%.6f, %.6f] (bootstrap)\n",
+            confidence_suffix(confidence), mean_lo, mean_hi);
+    buf_add(b, "  median %s CI     [%.6f, %.6f] (bootstrap)\n",
+            confidence_suffix(confidence), med_lo, med_hi);
+    buf_add(b, "  sd %s CI         [%.6f, %.6f] (bootstrap)\n",
+            confidence_suffix(confidence), sd_lo, sd_hi);
+    buf_add(b, "  trimmed mean CI   [%.6f, %.6f] (bootstrap)\n", trim_lo,
+            trim_hi);
+    buf_add(b, "  population mean   %.6f [%.6f, %.6f] (cluster bootstrap)\n",
+            mean, cluster_lo, cluster_hi);
+    buf_add(b, "  between-list var  %.6f\n", sigma_b2);
+    buf_add(b, "  within-list var   %.6f\n", sigma_w2);
+    buf_add(b, "  total variance    %.6f | population sd %.6f\n",
+            sigma_b2 + sigma_w2, sqrt(sigma_b2 + sigma_w2));
+    buf_add(b, "  ICC (list effect) %.4f | design effect %.3f | effective n "
+               "%.1f\n", icc, deff, n_eff);
+    free(sorted);
+}
+
 char *fc_stats_report(const FcDatasetList *list, FclScope scope,
                       const FcStatsOptions *options)
 {
     FcStatsOptions opt;
-    double *v = NULL;
-    Cluster *cl = NULL;
-    size_t n = 0, k = 0, rounds = 0;
     Buf b;
-    FclRng rng;
-    double mean, sd, se, med, mad, trimmed, skew, kurt, jb, jb_p;
-    double mean_lo, mean_hi, med_lo, med_hi, sd_lo, sd_hi;
-    double trim_lo, trim_hi;
-    double sigma_b2 = 0.0, sigma_w2 = 0.0, icc = 0.0, deff = 1.0, n_eff = 0.0;
-    double cluster_lo = 0.0, cluster_hi = 0.0;
-    double *sorted = NULL;
+    Sample all;
+    bool have_all;
+    size_t sessions = 0, rounds_total = 0, lists_total = 0;
 
     if (options != NULL) {
         opt = *options;
@@ -447,106 +566,61 @@ char *fc_stats_report(const FcDatasetList *list, FclScope scope,
         buf_add(&b, "No datasets loaded.\n");
         return b.text;
     }
-    v = copy_values(list, &n, &cl, &k, &rounds);
-    if (v == NULL) {
+    have_all = sample_build(list, -1, -1, &all);
+    if (!have_all) {
         buf_add(&b, "No measurements selected for the statistics.\n");
         return b.text;
     }
-    fcl_rng_seed(&rng, 0x5EED5EEDULL);
-    mean = mean_of(v, n);
-    sd = sqrt(var_of(v, n, mean));
-    se = n > 0 ? sd / sqrt((double)n) : 0.0;
-    {
-        double *s = malloc(n * sizeof(*s));
-
-        if (s != NULL) {
-            memcpy(s, v, n * sizeof(*s));
-            qsort(s, n, sizeof(*s), cmp_double);
-            sorted = s;
-        }
+    for (size_t d = 0; d < list->count; d++) {
+        sessions += list->items[d].n_sessions;
     }
-    med = sorted != NULL ? median_sorted(sorted, n) : mean;
-    mad = sorted != NULL ? mad_sorted(sorted, n, med) * 1.4826 : 0.0;
-    trimmed = sorted != NULL ? trimmed_mean(sorted, n, 0.1) : mean;
-    skew = skewness(v, n, mean, sd);
-    kurt = kurtosis_excess(v, n, mean, sd);
-    jb = n > 2 ? (double)n / 6.0 * (skew * skew + kurt * kurt / 4.0) : 0.0;
-    jb_p = fcl_chi2_p(jb, 2);
-    bootstrap_ci(v, n, stat_mean, opt.bootstrap,
-                 1.0 - (1.0 - (double)opt.confidence / 100.0) , &rng,
-                 &mean_lo, &mean_hi);
-    bootstrap_ci(v, n, stat_median, opt.bootstrap,
-                 1.0 - (1.0 - (double)opt.confidence / 100.0) , &rng,
-                 &med_lo, &med_hi);
-    bootstrap_ci(v, n, stat_sd, opt.bootstrap,
-                 1.0 - (1.0 - (double)opt.confidence / 100.0) , &rng,
-                 &sd_lo, &sd_hi);
-    bootstrap_ci(v, n, stat_trimmed, opt.bootstrap,
-                 1.0 - (1.0 - (double)opt.confidence / 100.0) , &rng,
-                 &trim_lo, &trim_hi);
-    variance_components(cl, k, n, mean, &sigma_b2, &sigma_w2, &icc, &deff,
-                        &n_eff);
-    cluster_bootstrap_mean(cl, k, opt.bootstrap,
-                           1.0 - (1.0 - (double)opt.confidence / 100.0),
-                           &rng, &cluster_lo, &cluster_hi);
-
+    rounds_total = all.rounds;
+    lists_total = all.k;
     buf_add(&b, "FREQUENCY COUNTER STATISTICS\n");
     buf_add(&b, "============================\n");
     buf_add(&b, "Datasets: %zu | sessions: %zu | rounds: %zu | frequency "
-              "lists: %zu | measurements: %zu\n",
-            list->count, fcd_list_count_sessions(list),
-            fcd_list_count_rounds(list), k, n);
-    buf_add(&b, "Analysis scope: %s\n\n", fcl_scope_name(scope));
-    buf_add(&b, "Descriptive statistics (measurement values, Hz)\n");
-    buf_add(&b, "-----------------------------------------------\n");
-    buf_add(&b, "  n                 %zu\n", n);
-    buf_add(&b, "  mean              %.6f\n", mean);
-    buf_add(&b, "  standard error    %.6f\n", se);
-    buf_add(&b, "  std. deviation    %.6f\n", sd);
-    buf_add(&b, "  minimum           %.6f\n", sorted != NULL ? sorted[0] : 0.0);
-    buf_add(&b, "  Q1                %.6f\n",
-            sorted != NULL ? quantile_sorted(sorted, n, 0.25) : 0.0);
-    buf_add(&b, "  median            %.6f\n", med);
-    buf_add(&b, "  Q3                %.6f\n",
-            sorted != NULL ? quantile_sorted(sorted, n, 0.75) : 0.0);
-    buf_add(&b, "  maximum           %.6f\n",
-            sorted != NULL ? sorted[n - 1] : 0.0);
-    buf_add(&b, "  IQR               %.6f\n",
-            sorted != NULL ? quantile_sorted(sorted, n, 0.75) -
-                                 quantile_sorted(sorted, n, 0.25) : 0.0);
-    buf_add(&b, "  MAD (scaled)      %.6f\n", mad);
-    buf_add(&b, "  10%% trimmed mean  %.6f\n", trimmed);
-    buf_add(&b, "  skewness          %.4f\n", skew);
-    buf_add(&b, "  excess kurtosis   %.4f\n", kurt);
-    buf_add(&b, "\nNormality diagnostic\n");
-    buf_add(&b, "--------------------\n");
-    buf_add(&b, "  Jarque-Bera       %.4f (chi2 df=2, p = %.4g)\n", jb, jb_p);
-    buf_add(&b, "  verdict           %s\n",
-            jb_p < 0.05 ? "non-normal tails/skew"
-                        : "consistent with a normal distribution");
-    buf_add(&b, "\nBootstrap confidence intervals (%s, %zu replicates)\n",
-            confidence_suffix(opt.confidence), opt.bootstrap);
-    buf_add(&b, "---------------------------------------------------\n");
-    buf_add(&b, "  mean              [%.6f, %.6f]\n", mean_lo, mean_hi);
-    buf_add(&b, "  median            [%.6f, %.6f]\n", med_lo, med_hi);
-    buf_add(&b, "  std. deviation    [%.6f, %.6f]\n", sd_lo, sd_hi);
-    buf_add(&b, "  10%% trimmed mean  [%.6f, %.6f]\n", trim_lo, trim_hi);
-    buf_add(&b, "\nPopulation estimates (two-level model: frequency lists "
-                "within rounds)\n");
-    buf_add(&b, "-------------------------------------------------------------"
-                "-----\n");
-    buf_add(&b, "  cluster count     %zu\n", k);
-    buf_add(&b, "  between-list var  %.6f\n", sigma_b2);
-    buf_add(&b, "  within-list var   %.6f\n", sigma_w2);
-    buf_add(&b, "  total variance    %.6f\n", sigma_b2 + sigma_w2);
-    buf_add(&b, "  ICC (list effect) %.4f\n", icc);
-    buf_add(&b, "  design effect     %.3f\n", deff);
-    buf_add(&b, "  effective n       %.1f\n", n_eff);
-    buf_add(&b, "  population mean   %.6f [%.6f, %.6f] (cluster bootstrap "
-                "%s)\n", mean, cluster_lo, cluster_hi,
-            confidence_suffix(opt.confidence));
-    buf_add(&b, "  population sd     %.6f\n", sqrt(sigma_b2 + sigma_w2));
-    if (rounds >= 1 && opt.per_round) {
+               "lists: %zu | measurements: %zu\n",
+            list->count, sessions, rounds_total, lists_total, all.n);
+    buf_add(&b, "Analysis scope: %s | confidence %s | bootstrap %zu\n",
+            fcl_scope_name(scope), confidence_suffix(opt.confidence),
+            opt.bootstrap);
+
+    /* Per-session statistics first (checked frequency lists only). */
+    buf_add(&b, "\nPER-SESSION STATISTICS\n");
+    buf_add(&b, "======================\n");
+    {
+        size_t printed = 0;
+
+        for (size_t d = 0; d < list->count; d++) {
+            const FcDataset *ds = &list->items[d];
+
+            for (size_t s = 0; s < ds->n_sessions; s++) {
+                const FcSession *ss = &ds->sessions[s];
+                Sample one;
+                char heading[512];
+
+                if (!sample_build(list, (long)d, (long)s, &one)) continue;
+                snprintf(heading, sizeof(heading), "Session: %s / %s",
+                         ds->title != NULL ? ds->title : ds->dataset_id,
+                         ss->session_id.text);
+                render_block(&b, &one, heading, opt.confidence,
+                             opt.bootstrap);
+                sample_free(&one);
+                printed++;
+            }
+        }
+        if (printed == 0) {
+            buf_add(&b, "  (no session has selected frequency lists)\n");
+        }
+    }
+
+    /* Then the statistics over all selected data. */
+    buf_add(&b, "\nALL SELECTED DATA\n");
+    buf_add(&b, "=================\n");
+    render_block(&b, &all, "All selected data", opt.confidence,
+                 opt.bootstrap);
+
+    if (all.rounds >= 1 && opt.per_round) {
         size_t dcount = 0;
 
         buf_add(&b, "\nRound means (per dataset, ordered as stored) and "
@@ -636,8 +710,6 @@ char *fc_stats_report(const FcDatasetList *list, FclScope scope,
                 "normality (skewness/kurtosis). The Allan deviation of the "
                 "round means is a stability measure of the device over one "
                 "round.\n");
-    free(v);
-    free(cl);
-    free(sorted);
+    sample_free(&all);
     return b.text;
 }

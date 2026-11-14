@@ -5735,13 +5735,22 @@ static void test_fcstats(void)
     CHECK(text != NULL);
     if (text != NULL) {
         CHECK(strstr(text, "FREQUENCY COUNTER STATISTICS") != NULL);
+        CHECK(strstr(text, "PER-SESSION STATISTICS") != NULL);
+        CHECK(strstr(text, "Session: Stats test") != NULL);
+        CHECK(strstr(text, "ALL SELECTED DATA") != NULL);
+        {
+            const char *per = strstr(text, "PER-SESSION STATISTICS");
+            const char *allb = strstr(text, "ALL SELECTED DATA");
+
+            CHECK(per != NULL && allb != NULL && per < allb);
+        }
         CHECK(strstr(text, "measurements: 9") != NULL);
         CHECK(strstr(text, "mean              5.000000") != NULL);
         CHECK(strstr(text, "std. deviation    2.738613") != NULL);
         CHECK(strstr(text, "median            5.000000") != NULL);
         CHECK(strstr(text, "Jarque-Bera") != NULL);
-        CHECK(strstr(text, "Bootstrap confidence intervals (95%") != NULL);
-        CHECK(strstr(text, "Population estimates") != NULL);
+        CHECK(strstr(text, "95% CI") != NULL);
+        CHECK(strstr(text, "population mean") != NULL);
         CHECK(strstr(text, "ICC") != NULL);
         CHECK(strstr(text, "design effect") != NULL);
         CHECK(strstr(text, "effective n") != NULL);
@@ -5800,6 +5809,12 @@ static void test_fcstats(void)
         if (text != NULL) {
             CHECK(strstr(text, "Single-round dataset") != NULL);
             CHECK(strstr(text, "Two-round dataset") != NULL);
+            CHECK(strstr(text, "Session: Single-round dataset") != NULL);
+            CHECK(strstr(text, "Session: Two-round dataset") != NULL);
+            /* each session block has its own descriptive statistics */
+            CHECK(strstr(text, "10.500000") != NULL);   /* 10, 11 */
+            CHECK(strstr(text, "21.500000") != NULL);   /* 20..23 */
+            CHECK(strstr(text, "ALL SELECTED DATA") != NULL);
             CHECK(strstr(text, "n/a (needs >= 2 rounds)") != NULL);
             free(text);
         }

@@ -218,6 +218,13 @@ The lattice tests use the 3GPP candidate spacings:
   uniform null).
 * **Silverman** critical-bandwidth bootstrap for multimodality
   (Hartigan's dip is not implemented in this build).
+* **Global subject filter**: above the tree a "Subjects (all datasets,
+  deduplicated)" panel lists every distinct subject name found in the loaded
+  datasets exactly once. Unchecking a name unchecks every frequency list
+  with that name in every dataset/session/round (and re-checking checks
+  them all again); individual tree-leaf changes keep the matching global
+  checkbox in sync (it shows checked only while all its occurrences are
+  checked). The global change clears the parent restore history.
 * **Dataset / session / round / frequency-list selection**: every dataset
   root row, session row, round row and frequency-list (subject) row in the
   tree has a checkbox before the expander arrow (all checked when data is
@@ -314,6 +321,13 @@ copy) and shows — and can save — a text report with:
   (ordered as stored), with the Allan deviation of the round means
   (stability over one round) when at least two rounds contribute; a
   single-round dataset is still listed, with "n/a (needs >= 2 rounds)".
+
+The report is organised per session first: for every session that has
+checked frequency lists, a complete statistics block (descriptive, robust,
+normality, bootstrap intervals and the population estimates for that
+session's lists) is printed, and only after all session blocks follows the
+"ALL SELECTED DATA" block with the same statistics over every selected
+frequency list, plus the per-dataset round-mean/Allan-deviation table.
 
 The report is rendered in `fcstats.c` (`fc_stats_report()`), which only
 reads the dataset list, so the same computation is testable without GTK.

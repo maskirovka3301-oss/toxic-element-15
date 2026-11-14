@@ -8246,6 +8246,253 @@ static bool fc_round_is_selected(const Ui *ui, int di, int si, int ri)
 /* True when every round of the session is checked for analysis. */
 /* Flat flag index of (dataset, session, round); -1 when out of range. */
 
+/* ---- global subject filters (deduplicated, above the tree) ------------- */
+
+static void on_fc_global_subject_toggled(GtkToggleButton *btn,
+                                         gpointer user_data);
+static void fc_hist_clear(Ui *ui);
+static void fc_refresh_tree_flags(Ui *ui, GtkTreeIter *it);
+
+static void fc_global_free_names(Ui *ui)
+{
+    for (size_t i = 0; i < ui->fc_subject_name_count; i++) {
+        free(ui->fc_subject_names[i]);
+    }
+    free(ui->fc_subject_names);
+    free(ui->fc_subject_enabled);
+    free(ui->fc_subject_checks);
+    ui->fc_subject_names = NULL;
+    ui->fc_subject_enabled = NULL;
+    ui->fc_subject_checks = NULL;
+    ui->fc_subject_name_count = 0;
+    ui->fc_subject_name_cap = 0;
+}
+
+static long fc_global_find(const Ui *ui, const char *name)
+{
+    for (size_t i = 0; i < ui->fc_subject_name_count; i++) {
+        if (strcmp(ui->fc_subject_names[i], name) == 0) {
+            return (long)i;
+        }
+    }
+    return -1;
+}
+
+static long fc_global_add(Ui *ui, const char *name, bool enabled)
+{
+    if (ui->fc_subject_name_count == ui->fc_subject_name_cap) {
+        size_t cap = ui->fc_subject_name_cap == 0 ? 16
+                                                  : ui->fc_subject_name_cap * 2;
+        char **nn = realloc(ui->fc_subject_names, cap * sizeof(*nn));
+        bool *ne;
+        GtkWidget **nc;
+
+        if (nn == NULL) return -1;
+        ui->fc_subject_names = nn;
+        ne = realloc(ui->fc_subject_enabled, cap * sizeof(*ne));
+        if (ne == NULL) return -1;
+        ui->fc_subject_enabled = ne;
+        nc = realloc(ui->fc_subject_checks, cap * sizeof(*nc));
+        if (nc == NULL) return -1;
+        ui->fc_subject_checks = nc;
+        ui->fc_subject_name_cap = cap;
+    }
+    {
+        long idx = (long)ui->fc_subject_name_count;
+
+        ui->fc_subject_names[idx] = strdup(name);
+        if (ui->fc_subject_names[idx] == NULL) return -1;
+        ui->fc_subject_enabled[idx] = enabled;
+        ui->fc_subject_checks[idx] = NULL;
+        ui->fc_subject_name_count++;
+        return idx;
+    }
+}
+
+/* True when every frequency list carrying this subject name is checked. */
+static bool fc_global_all_checked(const Ui *ui, const char *name)
+{
+    bool saw = false;
+
+    for (size_t d = 0; d < ui->fc_datasets.count; d++) {
+        const FcDataset *ds = &ui->fc_datasets.items[d];
+
+        for (size_t s = 0; s < ds->n_sessions; s++) {
+            const FcSession *ss = &ds->sessions[s];
+
+            for (size_t r = 0; r < ss->n_rounds; r++) {
+                const FcRound *rr = &ss->rounds[r];
+
+                for (size_t j = 0; j < rr->n_subjects; j++) {
+                    if (strcmp(rr->subjects[j].name, name) != 0) continue;
+                    saw = true;
+                    if (!fc_subject_is_selected(ui, (int)d, (int)s, (int)r,
+                                                (int)j)) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    return saw;
+}
+
+/* Rebuild the checkbox list from the names present in the loaded data,
+ * keeping the enabled state of names that already existed. */
+static void fc_global_rebuild(Ui *ui)
+{
+    char **old_names = ui->fc_subject_names;
+    bool *old_enabled = ui->fc_subject_enabled;
+    size_t old_count = ui->fc_subject_name_count;
+    size_t old_cap = ui->fc_subject_name_cap;
+    GtkWidget **old_checks = ui->fc_subject_checks;
+
+    /* detach the old arrays so fc_global_add starts a new list */
+    ui->fc_subject_names = NULL;
+    ui->fc_subject_enabled = NULL;
+    ui->fc_subject_checks = NULL;
+    ui->fc_subject_name_count = 0;
+    ui->fc_subject_name_cap = 0;
+    for (size_t d = 0; d < ui->fc_datasets.count; d++) {
+        const FcDataset *ds = &ui->fc_datasets.items[d];
+
+        for (size_t s = 0; s < ds->n_sessions; s++) {
+            const FcSession *ss = &ds->sessions[s];
+
+            for (size_t r = 0; r < ss->n_rounds; r++) {
+                const FcRound *rr = &ss->rounds[r];
+
+                for (size_t j = 0; j < rr->n_subjects; j++) {
+                    const char *nm = rr->subjects[j].name;
+                    bool enabled = true;
+
+                    if (fc_global_find(ui, nm) >= 0) continue;
+                    for (size_t o = 0; o < old_count; o++) {
+                        if (strcmp(old_names[o], nm) == 0) {
+                            enabled = old_enabled[o];
+                        }
+                    }
+                    fc_global_add(ui, nm, enabled);
+                }
+            }
+        }
+    }
+    {
+        GList *kids = ui->fc_subject_box != NULL
+                          ? gtk_container_get_children(
+                                GTK_CONTAINER(ui->fc_subject_box))
+                          : NULL;
+        GList *k;
+
+        for (k = kids; k != NULL; k = k->next) {
+            gtk_widget_destroy(GTK_WIDGET(k->data));
+        }
+        if (kids != NULL) g_list_free(kids);
+    }
+    for (size_t i = 0; i < ui->fc_subject_name_count; i++) {
+        GtkWidget *cb = gtk_check_button_new_with_label(
+            ui->fc_subject_names[i]);
+
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(cb),
+                                     ui->fc_subject_enabled[i]);
+        g_object_set_data_full(G_OBJECT(cb), "fc-subject-name",
+                               strdup(ui->fc_subject_names[i]), free);
+        g_signal_connect(cb, "toggled",
+                         G_CALLBACK(on_fc_global_subject_toggled), ui);
+        ui->fc_subject_checks[i] = cb;
+        if (ui->fc_subject_box != NULL) {
+            gtk_flow_box_insert(GTK_FLOW_BOX(ui->fc_subject_box), cb, -1);
+        }
+    }
+    if (ui->fc_subject_box != NULL) gtk_widget_show_all(ui->fc_subject_box);
+    for (size_t i = 0; i < old_count; i++) free(old_names[i]);
+    free(old_names);
+    free(old_enabled);
+    free(old_checks);
+    (void)old_cap;
+}
+
+/* Apply a global subject checkbox state to every occurrence in the tree. */
+static void fc_global_apply(Ui *ui, const char *name, bool enabled)
+{
+    fc_subject_flags_ensure(ui);
+    fc_hist_clear(ui);
+    for (size_t d = 0; d < ui->fc_datasets.count; d++) {
+        const FcDataset *ds = &ui->fc_datasets.items[d];
+
+        for (size_t s = 0; s < ds->n_sessions; s++) {
+            const FcSession *ss = &ds->sessions[s];
+
+            for (size_t r = 0; r < ss->n_rounds; r++) {
+                const FcRound *rr = &ss->rounds[r];
+
+                for (size_t j = 0; j < rr->n_subjects; j++) {
+                    long flat;
+
+                    if (strcmp(rr->subjects[j].name, name) != 0) continue;
+                    flat = fc_subject_flat(ui, (int)d, (int)s, (int)r,
+                                           (int)j);
+                    if (flat >= 0 &&
+                        (size_t)flat < ui->fc_subject_flags_capacity) {
+                        ui->fc_subject_analyze[flat] = enabled;
+                    }
+                }
+            }
+        }
+    }
+    {
+        GtkTreeIter it;
+
+        if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(ui->fc_model),
+                                          &it)) {
+            do {
+                fc_refresh_tree_flags(ui, &it);
+            } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(ui->fc_model),
+                                              &it));
+        }
+    }
+    {
+        long idx = fc_global_find(ui, name);
+
+        if (idx >= 0) ui->fc_subject_enabled[idx] = enabled;
+    }
+}
+
+static void on_fc_global_subject_toggled(GtkToggleButton *btn,
+                                         gpointer user_data)
+{
+    Ui *ui = (Ui *)user_data;
+    const char *name = g_object_get_data(G_OBJECT(btn), "fc-subject-name");
+    bool enabled = gtk_toggle_button_get_active(btn);
+
+    if (ui == NULL || name == NULL || ui->fc_subject_guard) return;
+    fc_global_apply(ui, name, enabled);
+    if (ui->fc_status_label != NULL) {
+        char msg[256];
+
+        snprintf(msg, sizeof(msg), "Subject '%s' %s in every dataset.",
+                 name, enabled ? "checked" : "unchecked");
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label), msg);
+    }
+}
+
+/* Keep one global subject checkbox in sync after a tree-leaf change. */
+static void fc_global_sync_one(Ui *ui, const char *name)
+{
+    long idx = fc_global_find(ui, name);
+    bool all;
+
+    if (idx < 0) return;
+    all = fc_global_all_checked(ui, name);
+    ui->fc_subject_enabled[idx] = all;
+    if (ui->fc_subject_checks[idx] != NULL) {
+        ui->fc_subject_guard = true;
+        gtk_toggle_button_set_active(
+            GTK_TOGGLE_BUTTON(ui->fc_subject_checks[idx]), all);
+        ui->fc_subject_guard = false;
+    }
+}
+
 static void fc_tree_append(Ui *ui, GtkTreeIter *it, GtkTreeIter *parent,
                            const char *item, const char *id,
                            const char *details, size_t measurements,
@@ -8674,6 +8921,17 @@ static gboolean on_fc_dataset_toggled(GtkCellRendererToggle *renderer,
         active = ui->fc_subject_analyze[flat] ? FALSE : TRUE;
         ui->fc_subject_analyze[flat] = active != FALSE;
         gtk_tree_store_set(ui->fc_model, &it, FC_T_ANALYZE, active, -1);
+        if (di >= 0 && (size_t)di < ui->fc_datasets.count &&
+            si >= 0 && (size_t)si < ui->fc_datasets.items[di].n_sessions &&
+            ri >= 0 && (size_t)ri <
+                           ui->fc_datasets.items[di].sessions[si].n_rounds &&
+            ji >= 0 && (size_t)ji <
+                           ui->fc_datasets.items[di].sessions[si]
+                               .rounds[ri].n_subjects) {
+            fc_global_sync_one(
+                ui, ui->fc_datasets.items[di].sessions[si].rounds[ri]
+                        .subjects[ji].name);
+        }
     } else {
         return FALSE;
     }
@@ -8904,6 +9162,7 @@ static void fc_rebuild(Ui *ui, bool expand)
         }
     }
     fc_tree_build(ui, filter);
+    fc_global_rebuild(ui);
     if (expand || (filter != NULL && filter[0] != '\0')) {
         gtk_tree_view_expand_all(GTK_TREE_VIEW(ui->fc_view));
     } else {
@@ -9651,6 +9910,33 @@ static GtkWidget *build_fc_left_panel(Ui *ui)
         gtk_flow_box_insert(GTK_FLOW_BOX(explore), collapse, -1);
     }
     gtk_box_pack_start(GTK_BOX(left), explore, FALSE, FALSE, 0);
+
+    /* global (deduplicated) subject filters above the tree: one checkbox
+     * per subject name, switching every occurrence in every dataset */
+    {
+        GtkWidget *sub_frame = gtk_frame_new("Subjects (all datasets, "
+                                             "deduplicated)");
+        GtkWidget *sub_scroll = gtk_scrolled_window_new(NULL, NULL);
+
+        ui->fc_subject_box = gtk_flow_box_new();
+        gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(ui->fc_subject_box),
+                                        GTK_SELECTION_NONE);
+        gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(ui->fc_subject_box),
+                                        PAGE_SPACING);
+        gtk_container_add(GTK_CONTAINER(sub_scroll), ui->fc_subject_box);
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(sub_scroll),
+                                       GTK_POLICY_AUTOMATIC,
+                                       GTK_POLICY_AUTOMATIC);
+        gtk_widget_set_size_request(sub_scroll, -1, 96);
+        gtk_widget_set_tooltip_text(
+            sub_scroll,
+            "Every subject name found in the loaded datasets. Unchecking one "
+            "unchecks all of its frequency lists in the tree; re-checking it "
+            "checks them all again.");
+        gtk_container_add(GTK_CONTAINER(sub_frame), sub_scroll);
+        ui->fc_subject_scroll = sub_scroll;
+        gtk_box_pack_start(GTK_BOX(left), sub_frame, FALSE, FALSE, 0);
+    }
 
     /* the dataset / session / round / subject tree */
     ui->fc_model = gtk_tree_store_new(FC_T_COUNT, G_TYPE_STRING,
@@ -10605,6 +10891,7 @@ void ui_cleanup(Ui *ui)
     ui->fc_report_html = NULL;
     free(ui->fc_stats_text);
     ui->fc_stats_text = NULL;
+    fc_global_free_names(ui);
     fc_hist_clear(ui);
     free(ui->fc_session_analyze);
     ui->fc_session_analyze = NULL;
