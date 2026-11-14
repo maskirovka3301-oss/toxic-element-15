@@ -3779,12 +3779,24 @@ static gboolean on_db_range_released(GtkWidget *widget, GdkEvent *event,
  * peak-pane redraw. */
 static void db_detach_auto(Ui *ui)
 {
+    if (ui->initialising) {
+        /* startup trigger: initialise the read-outs/shading but keep Auto
+         * and the committed range untouched */
+        gtk_widget_queue_draw(ui->peak_pane);
+        return;
+    }
     if (ui->auto_scale) {
         ui->suppress_auto_commit = true;
         ui->auto_scale = false;
         gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->auto_check),
                                      FALSE);
         ui->suppress_auto_commit = false;
+        if (ui->db_min_scale != NULL) {
+            gtk_widget_set_sensitive(ui->db_min_scale, TRUE);
+        }
+        if (ui->db_max_scale != NULL) {
+            gtk_widget_set_sensitive(ui->db_max_scale, TRUE);
+        }
     }
     gtk_widget_queue_draw(ui->peak_pane);
 }
@@ -3830,6 +3842,7 @@ static void on_db_min_changed(GtkRange *range, gpointer user_data)
     }
     if (ui->db_min < DB_SCALE_MIN) ui->db_min = DB_SCALE_MIN;
     if (ui->db_min > DB_SCALE_MAX) ui->db_min = DB_SCALE_MAX;
+    if (ui->initialising) ui->db_init_triggers++;
     db_detach_auto(ui);
 }
 
@@ -3857,6 +3870,7 @@ static void on_db_max_changed(GtkRange *range, gpointer user_data)
     }
     if (ui->db_max < DB_SCALE_MIN) ui->db_max = DB_SCALE_MIN;
     if (ui->db_max > DB_SCALE_MAX) ui->db_max = DB_SCALE_MAX;
+    if (ui->initialising) ui->db_init_triggers++;
     db_detach_auto(ui);
 }
 
@@ -3890,6 +3904,12 @@ static void on_auto_toggled(GtkToggleButton *toggle, gpointer user_data)
     Ui *ui = (Ui *)user_data;
 
     ui->auto_scale = gtk_toggle_button_get_active(toggle);
+    if (ui->db_min_scale != NULL) {
+        gtk_widget_set_sensitive(ui->db_min_scale, !ui->auto_scale);
+    }
+    if (ui->db_max_scale != NULL) {
+        gtk_widget_set_sensitive(ui->db_max_scale, !ui->auto_scale);
+    }
     if (ui->auto_scale) {
         /* auto range: recomputed from the data on the next full repaint */
         ui->wf_valid = false;
@@ -6722,8 +6742,8 @@ void ui_init(Ui *ui, IqSource *src, WaterfallCache *cache)
     ui->visible_seconds = DEFAULT_VISIBLE_SECONDS;
     ui->visible_bw = src->sample_rate; /* full band by default */
     ui->freq_offset = 0.0;
-    ui->db_min = DEFAULT_DB_MIN;
-    ui->db_max = DEFAULT_DB_MAX;
+    ui->db_min = DB_SCALE_MIN;   /* full allowed dynamic range at startup */
+    ui->db_max = DB_SCALE_MAX;
     ui->auto_scale = true;
     /* the waterfall colour scheme starts from the default slider window;
      * the committed window is what the renderer uses (sliders commit on
@@ -10008,6 +10028,26 @@ void ui_build_window(Ui *ui)
 
     gtk_box_pack_start(GTK_BOX(ui->spectrum_page), control_box, FALSE,
                        FALSE, 0);
+
+    /* initialise the dynamic range: the sliders start at the minimum and
+     * maximum of the allowed range, are greyed out because Auto is on, and
+     * the value-changed handlers are triggered once with those values so
+     * every dependent read-out is initialised */
+    ui->initialising = true;
+    ui->db_init_triggers = 0;
+    if (ui->db_min_scale != NULL) {
+        on_db_min_changed(GTK_RANGE(ui->db_min_scale), ui);
+    }
+    if (ui->db_max_scale != NULL) {
+        on_db_max_changed(GTK_RANGE(ui->db_max_scale), ui);
+    }
+    ui->initialising = false;
+    if (ui->db_min_scale != NULL) {
+        gtk_widget_set_sensitive(ui->db_min_scale, !ui->auto_scale);
+    }
+    if (ui->db_max_scale != NULL) {
+        gtk_widget_set_sensitive(ui->db_max_scale, !ui->auto_scale);
+    }
 
     /* dB sliders start disabled because auto-scale is on */
 

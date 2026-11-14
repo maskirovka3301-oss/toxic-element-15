@@ -313,8 +313,12 @@ viridis colour scheme — used exactly as defined, no copy is modified —
 onto the selected dB window: for every raw dB value read from the render
 buffer the renderer computes (db - min)/(max - min), clamps it to [0,1]
 and looks up the base colour scheme. The render buffer itself is never
-transformed. The sliders are always usable: touching one switches Auto off
-without committing anything, and when the slider is released the committed
+transformed. The sliders start at the extremes of the allowed range (minimum dB on the
+Min slider, maximum dB on the Max slider), their value-changed handlers are
+triggered once at startup with those values so every dependent read-out is
+initialised, and they are greyed out (insensitive) while Auto is checked —
+unchecking Auto makes them usable and commits the full range. Touching a
+slider switches Auto off without committing anything, and when the slider is released the committed
 window is applied and the whole waterfall surface is re-rendered from the
 render buffer with that range. The allowed slider range is -150..+40 dB so
 a window can include the positive-dB peaks of these recordings. The peak

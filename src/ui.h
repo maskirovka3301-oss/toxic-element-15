@@ -66,6 +66,9 @@ typedef struct Ui {
     double db_min, db_max;
     bool   auto_scale;
     bool   suppress_auto_commit; /* slider drag is switching Auto off */
+    bool   initialising;         /* startup: do not let the handlers
+                                  * detach Auto or commit the range */
+    int    db_init_triggers;     /* handlers run once at startup (2) */
 
     /* --- selection & analysis --- */
     Region selection;      /* normalised selection rect  */
