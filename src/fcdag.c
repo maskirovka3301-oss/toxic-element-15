@@ -61,6 +61,7 @@ typedef struct {
     bool        have_model;       /* a K was selected                      */
     FclScope    scope;
     const bool *enabled;    /* user selection (NULL = all enabled) */
+    const FcProgress *progress;  /* optional worker progress         */
     /* evidence accumulated by the individual analyses */
     struct {
         char   family[24];
@@ -1481,7 +1482,19 @@ static FclTable *analysis_synthesis(FcCtx *c)
 static void fc_on_node(void *ctx, size_t index, size_t count,
                        const char *title)
 {
-    (void)ctx;
+    FcCtx *c = (FcCtx *)ctx;
+
+    if (c->progress != NULL) {
+        if (c->progress->total != NULL) {
+            *c->progress->total = (int)count;
+        }
+        if (c->progress->done != NULL) {
+            *c->progress->done = (int)index;
+        }
+        if (c->progress->stage != NULL) {
+            *c->progress->stage = (int)index;
+        }
+    }
     if (getenv("TE15_DEBUG_FCDAG") != NULL) {
         fprintf(stderr, "@node %zu/%zu %s\n", index + 1, count,
                 title != NULL ? title : "?");
@@ -1593,7 +1606,8 @@ static bool fc_enabled(void *ctx, const DagCoreNodeSpec *spec)
 }
 
 FcRun *fc_dag_run(const FcDatasetList *list, FclScope scope,
-                  const bool *enabled, char *err, size_t err_len)
+                  const bool *enabled, const FcProgress *progress, char *err,
+                  size_t err_len)
 {
     FcCtx ctx;
     DagCoreExec exec;
@@ -1603,6 +1617,14 @@ FcRun *fc_dag_run(const FcDatasetList *list, FclScope scope,
     ctx.list = list;
     ctx.scope = scope;
     ctx.enabled = enabled;
+    ctx.progress = progress;
+    if (progress != NULL) {
+        if (progress->done != NULL) *progress->done = 0;
+        if (progress->total != NULL) {
+            *progress->total = (int)fc_node_count;
+        }
+        if (progress->stage != NULL) *progress->stage = -1;
+    }
     ctx.blocks = fcl_blocks_build(list, scope, &ctx.n_blocks);
     fcl_rng_seed(&ctx.rng, FC_SEED);
     if (ctx.n_blocks > 0) {
@@ -1631,6 +1653,9 @@ FcRun *fc_dag_run(const FcDatasetList *list, FclScope scope,
     exec.enabled = fc_enabled;
     run = dagcore_execute(fc_node_specs, fc_node_count, &exec, &ctx, err,
                           err_len);
+    if (progress != NULL && progress->done != NULL) {
+        *progress->done = (int)(run != NULL ? run->count : fc_node_count);
+    }
     fcl_blocks_free(ctx.blocks);
     free(ctx.best_p);
     free(ctx.best_df);

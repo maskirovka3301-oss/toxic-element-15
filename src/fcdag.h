@@ -19,6 +19,14 @@
 
 #define FC_MAX_NODES 32
 
+/* Progress reported from the worker thread while the DAG runs. All fields
+ * are written by the worker and read by the UI timer (atomics). */
+typedef struct {
+    volatile int *done;        /* analyses completed so far               */
+    volatile int *total;       /* size of the registry                    */
+    volatile int *stage;       /* index of the analysis currently running */
+} FcProgress;
+
 typedef DagCoreRun FcRun;
 
 /* The analysis registry (the subcarrier-lattice test chain). */
@@ -33,7 +41,8 @@ extern const size_t          fc_node_count;
  * selects which registry nodes run; disabled nodes are recorded as skipped
  * with a reason and their dependants are skipped by the prerequisite rule. */
 FcRun *fc_dag_run(const FcDatasetList *list, FclScope scope,
-                  const bool *enabled, char *err, size_t err_len);
+                  const bool *enabled, const FcProgress *progress,
+                  char *err, size_t err_len);
 void   fc_dag_free(FcRun *run);
 
 #endif /* TE15_FCDAG_H */

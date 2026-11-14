@@ -380,7 +380,10 @@
  * freely resizable with the divider; it can also be detached into its own
  * window and re-attached. */
 #define DOCK_DEFAULT_FRACTION  (1.0 / 3.0)
-#define DOCK_FLOAT_TITLE       "Analysis"   /* detached window title */
+/* a detached tab window attaches when its centre comes this close (px) to
+ * the dock notebook and it hovers there for the given time */
+#define DOCK_ATTACH_MARGIN     140
+#define DOCK_ATTACH_HOVER_MS   700
 #define PAGE_MARGIN        8
 #define PAGE_SPACING       6
 #define SETTINGS_TAB_LABEL "Settings"
@@ -548,7 +551,6 @@ static void clear_selection_state(Ui *ui);
 static void set_info(Ui *ui, const char *fmt, ...);
 static void update_info_label(Ui *ui);
 static void wf_update_from_renderbuf(Ui *ui, int w, int h);
-static void dock_attach(Ui *ui);
 static void lte_hint_apply(Ui *ui, const RankedMatch *ids, size_t n,
                            double measured_bw_hz, const Metrics *m,
                            const ModCandidate *mods, size_t nmods);
@@ -4947,10 +4949,67 @@ static void update_info_label(Ui *ui)
     update_sel_bw_label(ui);
 }
 
+/* Async analysis job: a deep copy of the datasets is analysed in a worker
+ * thread (the engine only reads it) and the report is delivered back. */
+typedef struct {
+    Ui            *ui;
+    FclScope       scope;
+    bool           enabled[FC_MAX_NODES];
+    int            n_enabled_nodes;
+    FcDatasetList  snapshot;
+    volatile int   cancelled;
+    char          *text;
+    char          *markdown;
+    char          *html;
+    char           err[256];
+    size_t         nodes;
+    double         elapsed_s;
+    /* worker progress (read by the UI timer) */
+    volatile int   prog_done;
+    volatile int   prog_total;
+    volatile int   prog_stage;
+} FcJob;
+
+/* stage index last rendered into the Frequency Counter status label */
+static int fc_stage_shown = -1;
+
 static gboolean on_timer(gpointer user_data)
 {
     Ui *ui = (Ui *)user_data;
     int progress = wc_progress(ui->cache);
+
+    /* poll the frequency-counter DAG (READ ONLY; the idle callback owns the
+     * cleanup). fc_dag_run publishes the current node index and the number
+     * of completed analyses through the volatile counters. */
+    if (ui->fc_job != NULL) {
+        FcJob *fjob = (FcJob *)ui->fc_job;
+        int done = fjob->prog_done;
+        int total = fjob->prog_total;
+        int stage = fjob->prog_stage;
+
+        if (total <= 0) total = (int)fc_node_count;
+        if (done < 0) done = 0;
+        if (done > total) done = total;
+        if (ui->fc_progress != NULL) {
+            char text[96];
+
+            gtk_progress_bar_set_fraction(
+                GTK_PROGRESS_BAR(ui->fc_progress),
+                total > 0 ? (double)done / (double)total : 0.0);
+            snprintf(text, sizeof(text), "%d / %d analyses", done, total);
+            gtk_progress_bar_set_text(GTK_PROGRESS_BAR(ui->fc_progress), text);
+            gtk_widget_set_visible(ui->fc_progress, TRUE);
+        }
+        if (stage >= 0 && stage < (int)fc_node_count &&
+            stage != fc_stage_shown && ui->fc_status_label != NULL) {
+            char text[256];
+
+            fc_stage_shown = stage;
+            snprintf(text, sizeof(text), "Analysing %d/%d: %s…", stage + 1,
+                     total, fc_node_specs[stage].title);
+            gtk_label_set_text(GTK_LABEL(ui->fc_status_label), text);
+        }
+    }
 
     /* a transient bottom-right message expires after 5 seconds and the
      * routine status (filename/progress) comes back */
@@ -6305,6 +6364,9 @@ void ui_init(Ui *ui, IqSource *src, WaterfallCache *cache)
     ui->stream_buffer_fraction = 1.0 / 8.0;
     fcd_list_init(&ui->fc_datasets);
     for (size_t i = 0; i < FC_MAX_NODES; i++) ui->fc_node_enabled[i] = true;
+    ui->dock_page_count = 0;
+    ui->dock_hover_timer = 0;
+    ui->dock_hover_page = -1;
     ui->fc_node_check_count = 0;
     ui->streambuf = sb_create(cache, ui->stream_buffer_fraction);
     if (ui->streambuf != NULL) sb_wait_ready(ui->streambuf, 2000);
@@ -6827,12 +6889,22 @@ static void settings_init_widgets(Ui *ui)
 static void dock_add_page(Ui *ui, GtkWidget *page, const char *label)
 {
     GtkWidget *scroller = gtk_scrolled_window_new(NULL, NULL);
+    int idx = ui->dock_page_count;
 
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller),
                                    GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
     gtk_container_add(GTK_CONTAINER(scroller), page);
     gtk_notebook_append_page(GTK_NOTEBOOK(ui->dock_pane), scroller,
                              gtk_label_new(label));
+    if (idx < DOCK_MAX_PAGES) {
+        ui->dock_page_views[idx] = scroller;
+        snprintf(ui->dock_page_titles[idx], sizeof(ui->dock_page_titles[idx]),
+                 "%s", label);
+        ui->dock_page_order[idx] = idx;
+        ui->dock_page_windows[idx] = NULL;
+        ui->dock_page_detached[idx] = false;
+        ui->dock_page_count = idx + 1;
+    }
 }
 
 /* One row of the analysis settings editor. */
@@ -7077,7 +7149,6 @@ static void update_lte_hint_label(Ui *ui)
     gtk_label_set_text(GTK_LABEL(ui->demod_hint_label), text);
 }
 
-static void dock_attach(Ui *ui);
 static void lte_hint_apply(Ui *ui, const RankedMatch *ids, size_t n,
                            double measured_bw_hz, const Metrics *m,
                            const ModCandidate *mods, size_t nmods)
@@ -7311,22 +7382,7 @@ typedef enum {
     FC_KIND_UNASSIGNED
 } FcNodeKind;
 
-/* Async analysis job: a deep copy of the datasets is analysed in a worker
- * thread (the engine only reads it) and the report is delivered back. */
-typedef struct {
-    Ui            *ui;
-    FclScope       scope;
-    bool           enabled[FC_MAX_NODES];
-    int            n_enabled_nodes;
-    FcDatasetList  snapshot;
-    volatile int   cancelled;
-    char          *text;
-    char          *markdown;
-    char          *html;
-    char           err[256];
-    size_t         nodes;
-    double         elapsed_s;
-} FcJob;
+
 
 static gboolean fc_deliver(gpointer data);
 static gpointer fc_worker(gpointer data);
@@ -8057,7 +8113,12 @@ static gboolean fc_deliver(gpointer data)
             gtk_widget_set_sensitive(ui->fc_report_save_btn, TRUE);
         }
     }
-    if (ui->fc_progress != NULL) gtk_widget_set_visible(ui->fc_progress, FALSE);
+    if (ui->fc_progress != NULL) {
+        gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(ui->fc_progress), 1.0);
+        gtk_progress_bar_set_text(GTK_PROGRESS_BAR(ui->fc_progress), "100 %");
+        gtk_widget_set_visible(ui->fc_progress, FALSE);
+    }
+    fc_stage_shown = -1;
     if (ui->fc_analyze_btn != NULL) {
         gtk_widget_set_sensitive(ui->fc_analyze_btn, TRUE);
     }
@@ -8073,8 +8134,14 @@ static gpointer fc_worker(gpointer data)
 {
     FcJob *job = (FcJob *)data;
     char err[256] = "";
-    FcRun *run = fc_dag_run(&job->snapshot, job->scope, job->enabled, err,
-                            sizeof(err));
+    FcProgress progress;
+    FcRun *run;
+
+    progress.done = &job->prog_done;
+    progress.total = &job->prog_total;
+    progress.stage = &job->prog_stage;
+    run = fc_dag_run(&job->snapshot, job->scope, job->enabled, &progress, err,
+                     sizeof(err));
 
     if (run == NULL) {
         snprintf(job->err, sizeof(job->err), "%s",
@@ -8123,6 +8190,10 @@ static void on_fc_analyze_clicked(GtkButton *button, gpointer user_data)
         return;
     }
     ui->fc_job = job;
+    job->prog_done = 0;
+    job->prog_total = (int)fc_node_count;
+    job->prog_stage = -1;
+    fc_stage_shown = -1;
     {
         char text[256];
 
@@ -8134,7 +8205,11 @@ static void on_fc_analyze_clicked(GtkButton *button, gpointer user_data)
                  fcl_scope_name((FclScope)ui->fc_scope));
         gtk_label_set_text(GTK_LABEL(ui->fc_status_label), text);
     }
-    if (ui->fc_progress != NULL) gtk_widget_set_visible(ui->fc_progress, TRUE);
+    if (ui->fc_progress != NULL) {
+        gtk_progress_bar_set_fraction(GTK_PROGRESS_BAR(ui->fc_progress), 0.0);
+        gtk_progress_bar_set_text(GTK_PROGRESS_BAR(ui->fc_progress), "0 %");
+        gtk_widget_set_visible(ui->fc_progress, TRUE);
+    }
     gtk_widget_set_sensitive(ui->fc_analyze_btn, FALSE);
     if (g_thread_try_new("fc-analysis", fc_worker, job, NULL) == NULL) {
         ui->fc_job = NULL;
@@ -8521,6 +8596,7 @@ static GtkWidget *build_fc_analysis_page(Ui *ui)
 
     ui->fc_progress = gtk_progress_bar_new();
     gtk_progress_bar_set_pulse_step(GTK_PROGRESS_BAR(ui->fc_progress), 0.1);
+    gtk_progress_bar_set_show_text(GTK_PROGRESS_BAR(ui->fc_progress), TRUE);
     gtk_widget_set_visible(ui->fc_progress, FALSE);
     gtk_box_pack_start(GTK_BOX(page), ui->fc_progress, FALSE, FALSE, 0);
 
@@ -8545,6 +8621,9 @@ static GtkWidget *build_freq_counter_page(Ui *ui)
 
     fcd_list_init(&ui->fc_datasets);
     for (size_t i = 0; i < FC_MAX_NODES; i++) ui->fc_node_enabled[i] = true;
+    ui->dock_page_count = 0;
+    ui->dock_hover_timer = 0;
+    ui->dock_hover_page = -1;
     ui->fc_node_check_count = 0;
     analysis_page = build_fc_analysis_page(ui);
     gtk_notebook_append_page(GTK_NOTEBOOK(right), analysis_page,
@@ -8607,91 +8686,326 @@ static void on_dock_paned_allocate(GtkWidget *widget, GtkAllocation *alloc,
     dock_initial_position(ui);
 }
 
-/* Re-attach when the detached window is asked to close. */
-static gboolean on_dock_window_delete(GtkWidget *widget, GdkEvent *event,
-                                      gpointer user_data)
+/* ------------------------------------------------------------------ */
+/* Individual tab detach / attach                                     */
+/* ------------------------------------------------------------------ */
+
+static void dock_attach_page(Ui *ui, int idx);
+static void dock_detach_page(Ui *ui, int idx);
+static void dock_wrap_labels(GtkWidget *w);
+
+/* index of the dock page that owns `view`, or -1 */
+static int dock_page_of_view(Ui *ui, GtkWidget *view)
+{
+    for (int i = 0; i < ui->dock_page_count; i++) {
+        if (ui->dock_page_views[i] == view) return i;
+    }
+    return -1;
+}
+
+/* Show/hide the "drop here to attach" hint (label + notebook highlight). */
+static void dock_hint_set(Ui *ui, bool on)
+{
+    GtkStyleContext *ctx;
+
+    if (ui->dock_hint_label != NULL) {
+        int visible = gtk_widget_get_visible(ui->dock_hint_label);
+
+        if (on && !visible) gtk_widget_show(ui->dock_hint_label);
+        if (!on && visible) gtk_widget_hide(ui->dock_hint_label);
+    }
+    if (ui->dock_pane == NULL) return;
+    ctx = gtk_widget_get_style_context(ui->dock_pane);
+    if (on) {
+        if (!gtk_style_context_has_class(ctx, "dock-drop-target")) {
+            gtk_style_context_add_class(ctx, "dock-drop-target");
+        }
+    } else {
+        if (gtk_style_context_has_class(ctx, "dock-drop-target")) {
+            gtk_style_context_remove_class(ctx, "dock-drop-target");
+        }
+    }
+}
+
+static void dock_install_css(void)
+{
+    static bool installed;
+
+    if (installed) return;
+    installed = true;
+    {
+        GtkCssProvider *provider = gtk_css_provider_new();
+
+        gtk_css_provider_load_from_data(
+            provider,
+            ".dock-drop-target { border: 2px solid #6fbf6f; }\n", -1, NULL);
+        gtk_style_context_add_provider_for_screen(
+            gdk_screen_get_default(), GTK_STYLE_PROVIDER(provider),
+            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        g_object_unref(provider);
+    }
+}
+
+/* True when the floating window's centre is close enough to the dock
+ * notebook that dropping it there would attach the tab. */
+static bool dock_window_near_dock(Ui *ui, GtkWidget *win)
+{
+    GdkWindow *nw;
+    gint nx = 0, ny = 0, wx = 0, wy = 0, ww = 0, wh = 0;
+    GtkAllocation alloc;
+
+    if (win == NULL || ui->dock_pane == NULL) return false;
+    nw = gtk_widget_get_window(ui->dock_pane);
+    if (nw == NULL) return false;
+    gdk_window_get_origin(nw, &nx, &ny);
+    gtk_widget_get_allocation(ui->dock_pane, &alloc);
+    gtk_window_get_position(GTK_WINDOW(win), &wx, &wy);
+    gtk_window_get_size(GTK_WINDOW(win), &ww, &wh);
+    {
+        int cx = wx + ww / 2;
+        int cy = wy + wh / 2;
+        int margin = DOCK_ATTACH_MARGIN;
+
+        return cx >= nx - margin && cx <= nx + alloc.width + margin &&
+               cy >= ny - margin && cy <= ny + alloc.height + margin;
+    }
+}
+
+/* Hover time elapsed while a detached tab is near the dock: attach it. */
+static gboolean dock_hover_timeout(gpointer user_data)
 {
     Ui *ui = (Ui *)user_data;
 
-    (void)widget;
-    (void)event;
-    dock_attach(ui);
-    return TRUE;   /* the window is destroyed by dock_attach() */
-}
-
-/* Move the dock box into its own top-level window (detach) or back into
- * the main HPaned (attach), keeping the notebook and all of its pages. */
-static void dock_set_detached(Ui *ui, bool detached)
-{
-    GtkWidget *dock = ui->dock_box;
-
-    if (dock == NULL || ui->dock_paned == NULL) return;
-    if (detached == ui->dock_detached) return;
-    if (detached) {
-        int w = gtk_widget_get_allocated_width(ui->dock_pane);
-        int h = gtk_widget_get_allocated_height(ui->window);
-        GtkWidget *win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-        GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-
-        ui->dock_saved_position = gtk_paned_get_position(
-            GTK_PANED(ui->dock_paned));
-        gtk_window_set_title(GTK_WINDOW(win), DOCK_FLOAT_TITLE);
-        gtk_window_set_default_size(GTK_WINDOW(win),
-                                    w > 200 ? w : 420,
-                                    h > 200 ? h : 600);
-        gtk_window_set_transient_for(GTK_WINDOW(win),
-                                     GTK_WINDOW(ui->window));
-        gtk_window_set_destroy_with_parent(GTK_WINDOW(win), FALSE);
-        g_signal_connect(win, "delete-event",
-                         G_CALLBACK(on_dock_window_delete), ui);
-        g_object_ref(dock);
-        gtk_container_remove(GTK_CONTAINER(ui->dock_paned), dock);
-        gtk_container_add(GTK_CONTAINER(box), dock);
-        gtk_container_add(GTK_CONTAINER(win), box);
-        g_object_unref(dock);
-        ui->dock_window = win;
-        ui->dock_detached = true;
-        gtk_widget_show_all(win);
-        if (ui->dock_detach_btn != NULL) {
-            gtk_button_set_label(GTK_BUTTON(ui->dock_detach_btn), "Attach");
-        }
-    } else {
-        GtkWidget *win = ui->dock_window;
-        GtkWidget *box;
-
-        if (win == NULL) return;
-        box = gtk_bin_get_child(GTK_BIN(win));
-        g_object_ref(dock);
-        if (box != NULL) {
-            gtk_container_remove(GTK_CONTAINER(box), dock);
-        }
-        gtk_container_add(GTK_CONTAINER(ui->dock_paned), dock);
-        g_object_unref(dock);
-        ui->dock_window = NULL;
-        ui->dock_detached = false;
-        gtk_widget_destroy(win);
-        gtk_paned_set_position(GTK_PANED(ui->dock_paned),
-                               ui->dock_saved_position > 0
-                                   ? ui->dock_saved_position : 600);
-        if (ui->dock_detach_btn != NULL) {
-            gtk_button_set_label(GTK_BUTTON(ui->dock_detach_btn), "Detach");
-        }
+    ui->dock_hover_timer = 0;
+    if (ui->dock_hover_page < 0 || ui->dock_hover_page >= ui->dock_page_count) {
+        return G_SOURCE_REMOVE;
     }
-    gtk_widget_show_all(ui->dock_box);
+    if (dock_window_near_dock(ui,
+                              ui->dock_page_windows[ui->dock_hover_page])) {
+        dock_attach_page(ui, ui->dock_hover_page);
+    }
+    ui->dock_hover_page = -1;
+    dock_hint_set(ui, false);
+    return G_SOURCE_REMOVE;
 }
 
-static void dock_attach(Ui *ui)
+/* A detached window moved: hint and (after a short hover) attach. */
+static gboolean on_dock_float_configure(GtkWidget *win, GdkEvent *event,
+                                        gpointer user_data)
 {
-    dock_set_detached(ui, false);
+    Ui *ui = (Ui *)user_data;
+    int idx = -1;
+
+    (void)event;
+    for (int i = 0; i < ui->dock_page_count; i++) {
+        if (ui->dock_page_windows[i] == win) idx = i;
+    }
+    if (idx < 0) return FALSE;
+    if (dock_window_near_dock(ui, win)) {
+        ui->dock_hover_page = idx;
+        if (ui->dock_hover_timer == 0) {
+            ui->dock_hover_timer = g_timeout_add(
+                DOCK_ATTACH_HOVER_MS, dock_hover_timeout, ui);
+        }
+        dock_hint_set(ui, true);
+    } else {
+        if (ui->dock_hover_timer != 0) {
+            g_source_remove(ui->dock_hover_timer);
+            ui->dock_hover_timer = 0;
+        }
+        ui->dock_hover_page = -1;
+        dock_hint_set(ui, false);
+    }
+    return FALSE;
 }
 
-/* Detach/Attach button in the dock's little header bar. */
-static void on_dock_detach_clicked(GtkButton *button, gpointer user_data)
+/* The header button of a detached window: put the tab back. */
+static void on_dock_float_attach(GtkButton *button, gpointer user_data)
+{
+    Ui *ui = (Ui *)user_data;
+    int idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(button),
+                                                "dock-page"));
+
+    (void)button;
+    if (idx >= 0 && idx < ui->dock_page_count) {
+        dock_attach_page(ui, idx);
+    }
+}
+
+static void on_dock_float_attach_all(GtkButton *button, gpointer user_data)
 {
     Ui *ui = (Ui *)user_data;
 
     (void)button;
-    dock_set_detached(ui, !ui->dock_detached);
+    for (int i = 0; i < ui->dock_page_count; i++) {
+        if (ui->dock_page_detached[i]) dock_attach_page(ui, i);
+    }
+    dock_hint_set(ui, false);
+    if (ui->dock_detach_btn != NULL) {
+        gtk_widget_set_sensitive(ui->dock_detach_btn, true);
+    }
+}
+
+/* Closing a detached window attaches its tab back to the dock. */
+static gboolean on_dock_float_delete(GtkWidget *win, GdkEvent *event,
+                                     gpointer user_data)
+{
+    Ui *ui = (Ui *)user_data;
+    int idx = -1;
+
+    (void)event;
+    for (int i = 0; i < ui->dock_page_count; i++) {
+        if (ui->dock_page_windows[i] == win) idx = i;
+    }
+    if (idx >= 0) dock_attach_page(ui, idx);
+    return TRUE;   /* the window is destroyed by dock_attach_page() */
+}
+
+/* Insertion index that preserves the original tab order. */
+static int dock_attached_position(Ui *ui, int idx)
+{
+    int pos = 0;
+
+    for (int i = 0; i < ui->dock_page_count; i++) {
+        if (i == idx || ui->dock_page_detached[i]) continue;
+        if (ui->dock_page_order[i] < ui->dock_page_order[idx]) pos++;
+    }
+    return pos;
+}
+
+static void on_dock_detach_clicked(GtkButton *button, gpointer user_data);
+
+/* Move one tab out of the notebook into its own window. */
+static void dock_detach_page(Ui *ui, int idx)
+{
+    GtkWidget *view, *win, *box, *header, *title, *attach_btn, *all_btn;
+    char label[160];
+
+    if (idx < 0 || idx >= ui->dock_page_count) return;
+    if (ui->dock_page_detached[idx]) return;
+    view = ui->dock_page_views[idx];
+    if (view == NULL || ui->dock_pane == NULL) return;
+    dock_install_css();
+    g_object_ref(view);
+    gtk_container_remove(GTK_CONTAINER(ui->dock_pane), view);
+    win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    snprintf(label, sizeof(label), "%s — detached tab", ui->dock_page_titles[idx]);
+    gtk_window_set_title(GTK_WINDOW(win), label);
+    gtk_window_set_transient_for(GTK_WINDOW(win), GTK_WINDOW(ui->window));
+    gtk_window_set_destroy_with_parent(GTK_WINDOW(win), FALSE);
+    gtk_window_set_default_size(GTK_WINDOW(win), 640, 480);
+    box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    title = gtk_label_new(ui->dock_page_titles[idx]);
+    attach_btn = gtk_button_new_with_label("Attach to dock");
+    all_btn = gtk_button_new_with_label("Attach all");
+    {
+        GtkWidget *spacer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+
+        gtk_widget_set_hexpand(spacer, TRUE);
+        gtk_widget_set_halign(title, GTK_ALIGN_START);
+        gtk_widget_set_margin_start(title, 6);
+        gtk_box_pack_start(GTK_BOX(header), title, FALSE, FALSE, 4);
+        gtk_box_pack_start(GTK_BOX(header), spacer, TRUE, TRUE, 0);
+        gtk_widget_set_tooltip_text(attach_btn,
+                                    "Attach this tab back to the dock "
+                                    "(or drag the window onto the dock and "
+                                    "hover)");
+        g_object_set_data(G_OBJECT(attach_btn), "dock-page",
+                          GINT_TO_POINTER(idx));
+        g_signal_connect(attach_btn, "clicked",
+                         G_CALLBACK(on_dock_float_attach), ui);
+        g_signal_connect(all_btn, "clicked",
+                         G_CALLBACK(on_dock_float_attach_all), ui);
+        gtk_box_pack_start(GTK_BOX(header), attach_btn, FALSE, FALSE, 4);
+        gtk_box_pack_start(GTK_BOX(header), all_btn, FALSE, FALSE, 4);
+    }
+    gtk_box_pack_start(GTK_BOX(box), header, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(box), view, TRUE, TRUE, 0);
+    gtk_container_add(GTK_CONTAINER(win), box);
+    g_object_unref(view);
+    g_signal_connect(win, "configure-event",
+                     G_CALLBACK(on_dock_float_configure), ui);
+    g_signal_connect(win, "delete-event",
+                     G_CALLBACK(on_dock_float_delete), ui);
+    ui->dock_page_windows[idx] = win;
+    ui->dock_page_detached[idx] = true;
+    gtk_widget_show_all(win);
+    if (ui->dock_detach_btn != NULL) {
+        /* only the tabs that are still attached can be detached */
+        gtk_widget_set_sensitive(
+            ui->dock_detach_btn,
+            gtk_notebook_get_n_pages(GTK_NOTEBOOK(ui->dock_pane)) > 0);
+    }
+    if (ui->dock_hint_label != NULL) {
+        gtk_widget_hide(ui->dock_hint_label);
+    }
+}
+
+/* Put one detached tab back into the notebook at its original position. */
+static void dock_attach_page(Ui *ui, int idx)
+{
+    GtkWidget *win, *box, *view;
+    int pos;
+
+    if (idx < 0 || idx >= ui->dock_page_count) return;
+    if (!ui->dock_page_detached[idx]) return;
+    win = ui->dock_page_windows[idx];
+    view = ui->dock_page_views[idx];
+    if (win != NULL) {
+        if (ui->dock_hover_timer != 0) {
+            g_source_remove(ui->dock_hover_timer);
+            ui->dock_hover_timer = 0;
+        }
+        ui->dock_hover_page = -1;
+        dock_hint_set(ui, false);
+    }
+    if (win != NULL) {
+        g_signal_handlers_disconnect_by_func(
+            win, G_CALLBACK(on_dock_float_delete), ui);
+        g_signal_handlers_disconnect_by_func(
+            win, G_CALLBACK(on_dock_float_configure), ui);
+        box = gtk_bin_get_child(GTK_BIN(win));
+        g_object_ref(view);
+        if (box != NULL) {
+            gtk_container_remove(GTK_CONTAINER(box), view);
+        }
+        pos = dock_attached_position(ui, idx);
+        gtk_notebook_insert_page(GTK_NOTEBOOK(ui->dock_pane), view,
+                                 gtk_label_new(ui->dock_page_titles[idx]),
+                                 pos);
+        g_object_unref(view);
+        ui->dock_page_windows[idx] = NULL;
+        ui->dock_page_detached[idx] = false;
+        gtk_widget_destroy(win);
+        {
+            /* keep the wrapping that dock_wrap_labels applies to tabs */
+            GtkWidget *tab = gtk_notebook_get_tab_label(
+                GTK_NOTEBOOK(ui->dock_pane),
+                gtk_notebook_get_nth_page(GTK_NOTEBOOK(ui->dock_pane), pos));
+
+            if (/* re-wrap the fresh label */ 1) dock_wrap_labels(tab);
+        }
+    }
+    if (ui->dock_detach_btn != NULL) {
+        gtk_widget_set_sensitive(ui->dock_detach_btn, true);
+    }
+}
+
+/* Header button: detach the currently selected tab. */
+static void on_dock_detach_clicked(GtkButton *button, gpointer user_data)
+{
+    Ui *ui = (Ui *)user_data;
+    int cur;
+    int idx;
+
+    (void)button;
+    if (ui->dock_pane == NULL) return;
+    cur = gtk_notebook_get_current_page(GTK_NOTEBOOK(ui->dock_pane));
+    if (cur < 0) return;
+    idx = dock_page_of_view(ui, gtk_notebook_get_nth_page(
+                                    GTK_NOTEBOOK(ui->dock_pane), cur));
+    if (idx >= 0) dock_detach_page(ui, idx);
 }
 
 static void build_dock_pane(Ui *ui)
@@ -9094,10 +9408,22 @@ void ui_cleanup(Ui *ui)
         cairo_surface_destroy(about_image);
         about_image = NULL;
     }
-    if (ui->dock_window != NULL) {
-        gtk_widget_destroy(ui->dock_window);
-        ui->dock_window = NULL;
-        ui->dock_detached = false;
+    if (ui->dock_hover_timer != 0) {
+        g_source_remove(ui->dock_hover_timer);
+        ui->dock_hover_timer = 0;
+    }
+    for (int i = 0; i < ui->dock_page_count; i++) {
+        if (ui->dock_page_windows[i] != NULL) {
+            g_signal_handlers_disconnect_by_func(
+                ui->dock_page_windows[i], G_CALLBACK(on_dock_float_delete),
+                ui);
+            g_signal_handlers_disconnect_by_func(
+                ui->dock_page_windows[i], G_CALLBACK(on_dock_float_configure),
+                ui);
+            gtk_widget_destroy(ui->dock_page_windows[i]);
+            ui->dock_page_windows[i] = NULL;
+            ui->dock_page_detached[i] = false;
+        }
     }
     ui->wf_valid = false;
     clear_demod(ui);
@@ -9519,10 +9845,21 @@ void ui_build_window(Ui *ui)
         gtk_box_pack_start(GTK_BOX(header), title, FALSE, FALSE, 4);
         gtk_widget_set_hexpand(spacer, TRUE);
         gtk_box_pack_start(GTK_BOX(header), spacer, TRUE, TRUE, 0);
-        ui->dock_detach_btn = gtk_button_new_with_label("Detach");
-        gtk_widget_set_tooltip_text(ui->dock_detach_btn,
-                                    "Detach the analysis pane into its own "
-                                    "window (Attach brings it back)");
+        ui->dock_hint_label = gtk_label_new("Drop here to attach");
+        gtk_widget_set_halign(ui->dock_hint_label, GTK_ALIGN_END);
+        gtk_widget_set_tooltip_text(
+            ui->dock_hint_label,
+            "Drag a detached tab window onto the analysis pane and hover "
+            "to attach it again");
+        gtk_widget_set_no_show_all(ui->dock_hint_label, TRUE);
+        gtk_box_pack_start(GTK_BOX(header), ui->dock_hint_label, FALSE,
+                           FALSE, 4);
+        ui->dock_detach_btn = gtk_button_new_with_label("Detach tab");
+        gtk_widget_set_tooltip_text(
+            ui->dock_detach_btn,
+            "Detach the current tab into its own window; drag that window "
+            "back onto the analysis pane (or use Attach to dock) to "
+            "re-attach it");
         g_signal_connect(ui->dock_detach_btn, "clicked",
                          G_CALLBACK(on_dock_detach_clicked), ui);
         gtk_box_pack_start(GTK_BOX(header), ui->dock_detach_btn, FALSE,

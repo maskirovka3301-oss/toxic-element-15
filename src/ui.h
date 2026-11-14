@@ -162,13 +162,20 @@ typedef struct Ui {
     /* --- docked analysis pane (GtkNotebook, right of the waterfall) --- */
     GtkWidget *dock_pane;       /* tabbed analysis pane (right of the
                                  * waterfall) */
-    GtkWidget *dock_box;        /* dock header + notebook (packed/float) */
+    GtkWidget *dock_box;        /* dock header + notebook                */
     GtkWidget *dock_paned;      /* the HPaned holding the waterfall + dock */
-    GtkWidget *dock_detach_btn; /* Detach / Attach toggle                */
-    GtkWidget *dock_window;     /* floating window while detached        */
-    bool       dock_detached;
+#define DOCK_MAX_PAGES 8
+    GtkWidget *dock_page_views[DOCK_MAX_PAGES];   /* notebook pages      */
+    char       dock_page_titles[DOCK_MAX_PAGES][64];
+    int        dock_page_order[DOCK_MAX_PAGES];   /* stable tab order    */
+    GtkWidget *dock_page_windows[DOCK_MAX_PAGES]; /* detached windows    */
+    bool       dock_page_detached[DOCK_MAX_PAGES];
+    int        dock_page_count;
+    GtkWidget *dock_detach_btn; /* detaches the current tab               */
+    GtkWidget *dock_hint_label; /* "drop here to attach" hint             */
+    guint      dock_hover_timer;/* hover-to-attach timeout               */
+    int        dock_hover_page; /* detach candidate while hovering       */
     bool       dock_pos_initialised; /* default width already applied   */
-    int        dock_saved_position;  /* divider position before detach  */
 
     /* Demod page (live: follows the current selection) */
     GtkWidget *details_page;

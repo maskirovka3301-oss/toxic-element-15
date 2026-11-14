@@ -4445,8 +4445,8 @@ static void test_dagcore(void)
         FcRun *fc_run;
 
         fcd_list_init(&list);
-        fc_run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, NULL, err,
-                            sizeof(err));
+        fc_run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, NULL, NULL,
+                            err, sizeof(err));
         CHECK(fc_run != NULL);
         if (fc_run != NULL) {
             /* every node is recorded; with no data they are all skipped */
@@ -4649,8 +4649,8 @@ static void test_fclk(void)
             }
         }
         if (ds != NULL && list.count == 1) {
-            run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, NULL, err,
-                             sizeof(err));
+            run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, NULL, NULL,
+                             err, sizeof(err));
             CHECK(run != NULL);
             if (run != NULL) {
                 size_t mdl = dagcore_find(run, "mdl-eigen");
@@ -4765,7 +4765,7 @@ static void test_fclk(void)
             if (idx != (size_t)-1) enabled[idx] = false;
         }
         if (list.count == 1) {
-            run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, enabled, err,
+            run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, enabled, NULL, err,
                              sizeof(err));
             CHECK(run != NULL);
             if (run != NULL) {
@@ -4813,9 +4813,18 @@ static void test_fclk(void)
             }
         }
         if (ds != NULL && list.count == 1) {
-            run = fc_dag_run(&list, FCL_SCOPE_MERGED, NULL, err,
+            volatile int prog_done = -1, prog_total = -1, prog_stage = -1;
+            FcProgress progress;
+
+            progress.done = &prog_done;
+            progress.total = &prog_total;
+            progress.stage = &prog_stage;
+            run = fc_dag_run(&list, FCL_SCOPE_MERGED, NULL, &progress, err,
                              sizeof(err));
             CHECK(run != NULL);
+            CHECK(prog_total == (int)fc_node_count);
+            CHECK(prog_done == (int)fc_node_count);
+            CHECK(prog_stage >= 0 && prog_stage < (int)fc_node_count);
             if (run != NULL) {
                 size_t ev = dagcore_find(run, "evidence-filter");
                 size_t syn = dagcore_find(run, "synthesis");
@@ -5232,8 +5241,8 @@ static void test_fclattice(void)
         if (ds != NULL) {
             size_t done = 0;
 
-            run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, NULL, err,
-                             sizeof(err));
+            run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, NULL, NULL,
+                             err, sizeof(err));
             CHECK(run != NULL);
             if (run != NULL) {
                 char *text = NULL, *md = NULL, *html = NULL;
@@ -5308,8 +5317,8 @@ static void test_fcdag(void)
     puts("\n-- Frequency Counter analysis DAG --");
     fcd_list_init(&list);
     CHECK(fc_node_count == 20);   /* the subcarrier-lattice test chain */
-    run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, NULL, err,
-                             sizeof(err));
+    run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, NULL, NULL,
+                             err, sizeof(err));
     CHECK(run != NULL);
     if (run != NULL) {
         CHECK(run->count == fc_node_count);

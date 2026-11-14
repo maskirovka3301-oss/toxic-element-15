@@ -238,7 +238,11 @@ Analyze run and stated in the report header.
 
 Every test is deterministic (fixed RNG seed), reports effect sizes (R, V,
 theta, enrichment, cluster mass) as well as p-values, and the report
-renders the tables as text, Markdown and HTML.
+renders the tables as text, Markdown and HTML. While the asynchronous DAG
+runs, the Analysis progress bar follows the node progression (`k / n
+analyses`) and the status line names the analysis currently executing;
+the registry size and node index are published by the worker through the
+FcProgress block and polled by the UI timer.
 
 Datasets are loaded and written with json-c against the JSON schema:
 required properties are enforced, unknown properties are rejected
@@ -255,8 +259,14 @@ begin/end/skip API via its `dag.h` façade; the Frequency Counter defines
 its own registry (`fcdag.h/.c`, still empty - analyses to be defined) and
 lets the engine walk it with an executor callback. Report rendering is a
 separate concern: `report.h/.c` renders the Spectrum document and
-`fcreport.h/.c` the frequency-counter document, each in text/Markdown/HTML. The docked pane can be detached into its own window and
-re-attached, and its Settings tab comes last.
+`fcreport.h/.c` the frequency-counter document, each in text/Markdown/HTML. One tab at a time can be detached from the dock into its own window (the
+"Detach tab" header button detaches the current tab); the floating window
+shows the tab with an "Attach to dock" button and re-attaches when that
+button is used, when the window is closed, or when it is dragged close to
+the dock notebook and hovers there (the dock shows a green highlight and a
+"Drop here to attach" hint while the window is in range). The tabs keep
+their order when they return. The docked pane as a whole can also be
+detached into its own window and re-attached, and its Settings tab comes last.
 
 ## Docked analysis pane
 
