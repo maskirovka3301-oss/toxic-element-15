@@ -317,9 +317,7 @@ typedef struct Ui {
     GtkWidget *window;
     GtkWidget *main_notebook;   /* main view tabs (currently "Spectrum") */
     GtkWidget *spectrum_page;   /* the page holding the waterfall + dock */
-    GtkWidget *freq_counter_page;   /* second main tab: frequency counter */
-    GtkWidget *freq_counter_label;  /* big frequency read-out           */
-    GtkWidget *freq_counter_detail; /* bin/level/band detail line       */
+    GtkWidget *freq_counter_page;   /* second main tab (empty for now)  */
     GtkWidget *drawing;
     /* stationary-hover hint ("Shift+Click to select"): drawn inside the
      * waterfall with the same in-widget tag style as the frequency readout */

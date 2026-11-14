@@ -138,6 +138,17 @@ Reported peaks are sub-bin refined and sorted with the fundamental
 (symbol/baud/chip rate) first. The UI shows the SCF image, the CDP plot
 with marked peaks, and the ranked cyclic feature list.
 
+## Main window layout
+
+Below the menu bar the main window is a GtkNotebook with two tabs. The
+**Spectrum** tab holds the whole view - the HPaned with the waterfall +
+timeline scrollbar on the left and the dockable analysis pane on the
+right, plus the bottom toolbar and status bar. The second tab,
+**Frequency Counter**, is intentionally empty for now (a placeholder for
+controls still to be designed); selecting it changes nothing in the
+Spectrum view. The docked pane can be detached into its own window and
+re-attached, and its Settings tab comes last.
+
 ## Docked analysis pane
 
 The main window is an HPaned: waterfall + timeline scrollbar on the

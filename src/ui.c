@@ -212,8 +212,6 @@
  * further views later). */
 #define MAIN_TAB_LABEL      "Spectrum"
 #define FREQ_COUNTER_TAB_LABEL "Frequency Counter"
-/* how often the live frequency counter re-measures while its tab is shown */
-#define FREQ_COUNTER_UPDATE_US 500000
 #define MENU_OPEN_LABEL     "Open…"
 #define MENU_ABOUT_LABEL    "About"
 #define MENU_QUIT_LABEL     "Quit"
@@ -544,7 +542,6 @@ static void set_info(Ui *ui, const char *fmt, ...);
 static void update_info_label(Ui *ui);
 static void wf_update_from_renderbuf(Ui *ui, int w, int h);
 static void dock_attach(Ui *ui);
-static void run_freq_counter(Ui *ui);
 static void lte_hint_apply(Ui *ui, const RankedMatch *ids, size_t n,
                            double measured_bw_hz, const Metrics *m,
                            const ModCandidate *mods, size_t nmods);
@@ -4981,21 +4978,6 @@ static gboolean on_timer(gpointer user_data)
     Ui *ui = (Ui *)user_data;
     int progress = wc_progress(ui->cache);
 
-    /* a visible Frequency Counter tab updates live (twice a second) */
-    if (ui->freq_counter_page != NULL && ui->main_notebook != NULL) {
-        static gint64 last_counter_us;
-
-        gint64 now_us = g_get_monotonic_time();
-
-        if (now_us - last_counter_us >= FREQ_COUNTER_UPDATE_US &&
-            gtk_notebook_get_current_page(GTK_NOTEBOOK(ui->main_notebook)) ==
-                gtk_notebook_page_num(GTK_NOTEBOOK(ui->main_notebook),
-                                      ui->freq_counter_page)) {
-            last_counter_us = now_us;
-            run_freq_counter(ui);
-        }
-    }
-
     /* poll the async Analyze job (READ ONLY — the idle
      * callbacks own the cleanup) */
     if (current_report_job != NULL) {
@@ -7113,7 +7095,6 @@ static void update_lte_hint_label(Ui *ui)
 }
 
 static void dock_attach(Ui *ui);
-static void run_freq_counter(Ui *ui);
 static void lte_hint_apply(Ui *ui, const RankedMatch *ids, size_t n,
                            double measured_bw_hz, const Metrics *m,
                            const ModCandidate *mods, size_t nmods)
@@ -7326,167 +7307,17 @@ static GtkWidget *build_demodulate_page(Ui *ui)
 
 /* --- Frequency Counter tab --------------------------------------------- */
 
-/* Measure the strongest spectral component inside the current selection
- * (or the visible band) and show it with sub-bin refinement. The mean
- * spectrum over the visible frames comes from the waterfall cache, the
- * peak is interpolated parabolically over its neighbouring bins. */
-static void run_freq_counter(Ui *ui)
-{
-    int n;
-    double sr, bin_hz, fmin, fmax, off_hz, f_hz, level;
-    int b0, b1, bpeak;
-    char main_text[128];
-    char detail[256];
-
-    if (ui == NULL || ui->freq_counter_label == NULL || ui->src == NULL) {
-        return;
-    }
-    n = wc_fft_size(ui->cache);
-    if (n < 8 || wc_frames_per_second(ui->cache) <= 0.0) {
-        gtk_label_set_text(GTK_LABEL(ui->freq_counter_label),
-                           "waiting for the waterfall cache…");
-        gtk_label_set_text(GTK_LABEL(ui->freq_counter_detail), "");
-        return;
-    }
-    update_peak_spectrum(ui);
-    if (!ui->peak_valid || ui->peak_spectrum == NULL) {
-        gtk_label_set_text(GTK_LABEL(ui->freq_counter_label),
-                           "measuring…");
-        gtk_label_set_text(GTK_LABEL(ui->freq_counter_detail), "");
-        return;
-    }
-    sr = ui->src->sample_rate;
-    bin_hz = sr / (double)n;
-    /* the measured band: the selection, or the visible view */
-    if (ui->has_selection) {
-        fmin = ui->selection.freq_min - ui->src->center_freq;
-        fmax = ui->selection.freq_max - ui->src->center_freq;
-    } else {
-        fmin = -sr / 2.0 + ui->freq_offset;
-        fmax = fmin + ui->visible_bw;
-    }
-    /* bins are centred on the recording's centre (DC is at n/2) */
-    b0 = (int)floor(fmin / bin_hz + (double)n / 2.0) + 1;
-    b1 = (int)ceil(fmax / bin_hz + (double)n / 2.0) - 1;
-    if (b0 < 1) b0 = 1;
-    if (b1 > n - 2) b1 = n - 2;
-    if (b1 <= b0) {
-        gtk_label_set_text(GTK_LABEL(ui->freq_counter_label),
-                           "band too narrow to resolve");
-        gtk_label_set_text(GTK_LABEL(ui->freq_counter_detail), "");
-        return;
-    }
-    bpeak = b0;
-    for (int b = b0; b <= b1; b++) {
-        if (ui->peak_spectrum[b] > ui->peak_spectrum[bpeak]) bpeak = b;
-    }
-    level = ui->peak_spectrum[bpeak];
-    off_hz = ((double)bpeak - (double)n / 2.0) * bin_hz;
-    /* parabolic interpolation over the peak's neighbours (sub-bin) */
-    {
-        double y0 = ui->peak_spectrum[bpeak - 1];
-        double y1 = ui->peak_spectrum[bpeak];
-        double y2 = ui->peak_spectrum[bpeak + 1];
-        double denom = y0 - 2.0 * y1 + y2;
-        double delta = 0.0;
-
-        if (fabs(denom) > 1e-9) delta = 0.5 * (y0 - y2) / denom;
-        if (delta > 0.5) delta = 0.5;
-        if (delta < -0.5) delta = -0.5;
-        off_hz += delta * bin_hz;
-    }
-    f_hz = ui->src->center_freq + off_hz;
-    if (ui->src->is_audio) {
-        if (fabs(f_hz) < 1000.0) {
-            snprintf(main_text, sizeof(main_text), "%.2f Hz", f_hz);
-        } else {
-            snprintf(main_text, sizeof(main_text), "%.3f kHz", f_hz / 1e3);
-        }
-    } else {
-        snprintf(main_text, sizeof(main_text), "%.6f MHz", f_hz / 1e6);
-    }
-    gtk_label_set_text(GTK_LABEL(ui->freq_counter_label), main_text);
-    snprintf(detail, sizeof(detail),
-             "%+.1f Hz from the recording centre · bin %.1f Hz · peak "
-             "%.1f dB · %s %.1f kHz wide",
-             off_hz, bin_hz, level,
-             ui->has_selection ? "selection" : "visible band",
-             (fmax - fmin) / 1e3);
-    gtk_label_set_text(GTK_LABEL(ui->freq_counter_detail), detail);
-}
-
-static void on_freq_counter_measure(GtkButton *button, gpointer user_data)
-{
-    (void)button;
-    run_freq_counter((Ui *)user_data);
-}
-
-/* the tab became visible: measure at once */
-static void on_main_tab_switched(GtkNotebook *notebook, GtkWidget *page,
-                                 guint page_num, gpointer user_data)
-{
-    Ui *ui = (Ui *)user_data;
-
-    (void)notebook;
-    (void)page_num;
-    if (page == ui->freq_counter_page) run_freq_counter(ui);
-}
-
+/* The "Frequency Counter" page is intentionally empty: it is a placeholder
+ * tab next to Spectrum, ready to receive its controls later. */
 static GtkWidget *build_freq_counter_page(Ui *ui)
 {
     GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, PAGE_SPACING);
-    GtkWidget *title = gtk_label_new("Frequency Counter");
-    GtkWidget *notice = gtk_label_new(
-        "Measures the strongest spectral component inside the current "
-        "selection (or the visible band) and refines the peak by parabolic "
-        "interpolation between the neighbouring FFT bins.");
-    GtkWidget *hbox = gtk_flow_box_new();
-    GtkWidget *btn = gtk_button_new_with_label("Measure now");
 
+    (void)ui;
     gtk_widget_set_margin_start(page, PAGE_MARGIN * 2);
     gtk_widget_set_margin_end(page, PAGE_MARGIN * 2);
     gtk_widget_set_margin_top(page, PAGE_MARGIN * 2);
     gtk_widget_set_margin_bottom(page, PAGE_MARGIN * 2);
-    gtk_label_set_xalign(GTK_LABEL(title), 0.0);
-    {
-        PangoAttrList *attrs = pango_attr_list_new();
-
-        pango_attr_list_insert(attrs,
-                               pango_attr_scale_new(PANGO_SCALE_LARGE * 1.4));
-        pango_attr_list_insert(attrs,
-                               pango_attr_weight_new(PANGO_WEIGHT_BOLD));
-        gtk_label_set_attributes(GTK_LABEL(title), attrs);
-        pango_attr_list_unref(attrs);
-    }
-    gtk_label_set_xalign(GTK_LABEL(notice), 0.0);
-    gtk_label_set_line_wrap(GTK_LABEL(notice), TRUE);
-    gtk_box_pack_start(GTK_BOX(page), title, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(page), notice, FALSE, FALSE, 0);
-    gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(hbox), GTK_SELECTION_NONE);
-    gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(hbox), PAGE_SPACING);
-    g_signal_connect(btn, "clicked",
-                     G_CALLBACK(on_freq_counter_measure), ui);
-    gtk_flow_box_insert(GTK_FLOW_BOX(hbox), btn, -1);
-    gtk_box_pack_start(GTK_BOX(page), hbox, FALSE, FALSE, 0);
-    ui->freq_counter_label = gtk_label_new("—");
-    gtk_label_set_xalign(GTK_LABEL(ui->freq_counter_label), 0.0);
-    gtk_label_set_selectable(GTK_LABEL(ui->freq_counter_label), TRUE);
-    {
-        PangoAttrList *attrs = pango_attr_list_new();
-
-        pango_attr_list_insert(attrs,
-                               pango_attr_scale_new(PANGO_SCALE_LARGE * 2.0));
-        pango_attr_list_insert(attrs,
-                               pango_attr_weight_new(PANGO_WEIGHT_BOLD));
-        gtk_label_set_attributes(GTK_LABEL(ui->freq_counter_label), attrs);
-        pango_attr_list_unref(attrs);
-    }
-    gtk_box_pack_start(GTK_BOX(page), ui->freq_counter_label, FALSE, FALSE, 0);
-    ui->freq_counter_detail = gtk_label_new("");
-    gtk_label_set_xalign(GTK_LABEL(ui->freq_counter_detail), 0.0);
-    gtk_label_set_line_wrap(GTK_LABEL(ui->freq_counter_detail), TRUE);
-    gtk_label_set_selectable(GTK_LABEL(ui->freq_counter_detail), TRUE);
-    gtk_box_pack_start(GTK_BOX(page), ui->freq_counter_detail, FALSE, FALSE, 0);
     return page;
 }
 
@@ -8386,8 +8217,6 @@ void ui_build_window(Ui *ui)
     gtk_notebook_append_page(GTK_NOTEBOOK(ui->main_notebook),
                              ui->freq_counter_page,
                              gtk_label_new(FREQ_COUNTER_TAB_LABEL));
-    g_signal_connect(ui->main_notebook, "switch-page",
-                     G_CALLBACK(on_main_tab_switched), ui);
     gtk_box_pack_start(GTK_BOX(vbox), ui->main_notebook, TRUE, TRUE, 0);
 
     /* --- waterfall drawing area + peak pane --- */
