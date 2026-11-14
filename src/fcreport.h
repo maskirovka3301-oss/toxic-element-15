@@ -13,11 +13,11 @@
 #include <stddef.h>
 
 #include "dagcore.h"
-#include "freqseries.h"
+#include "fcdataset.h"
 
 /* Render the report; the caller frees each non-NULL string. `run` may be
  * NULL (nothing executed yet). */
-void fc_report(const FreqSeriesList *list, const DagCoreRun *run,
+void fc_report(const FcDatasetList *list, const DagCoreRun *run,
                char **text_out, char **md_out, char **html_out);
 
 #endif /* TE15_FCREPORT_H */

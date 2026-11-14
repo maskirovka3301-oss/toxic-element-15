@@ -26,7 +26,7 @@ IQ), same behaviour, cleaner structure.
 | `hos.h/.c`        | Higher-order statistics: 2nd-6th order cumulants (Swami & Sadler), normalised |C40|/|C41|/|C42| over C21^2, Gaussian-suppression verdict, bicoherence bispectrum |
 | `dagcore.h/.c`    | Generic analysis-DAG engine: node registry, dependency ordering, statuses, skip rationales, timings, cancellation, progress; used by both the Spectrum and Frequency Counter panes |
 | `dag.h/.c`        | Spectrum analysis node registry (A0..A9, post-DAG aggregations) and typed façade over `dagcore` |
-| `freqseries.h/.c` | Frequency-measurement sessions: load text files, metadata, deep copy |
+| `fcdataset.h/.c`  | Measurement datasets per `schema/fc_dataset.json`: schema-validated JSON load/save (json-c), dataset→session→round→subject→measurements model, statistics, deep copy |
 | `fcdag.h/.c`      | Frequency Counter analysis registry on `dagcore` (empty until the algorithms are defined) |
 | `fcreport.h/.c`   | Frequency Counter report rendering (text/Markdown/HTML from one document model) |
 | `ui.h/.c`         | GTK3 UI: waterfall widget, controls, selection, timeline scrollbar + RFC 3339 scrub tooltip, analysis popup, demod player, cyclostationary window, fluctuation window, menu bar |
@@ -168,6 +168,12 @@ right side is a notebook with an **Analysis** page (Analyze button,
 progress bar, Text/Markdown/HTML report selector, Save report and a
 read-only report view, mirroring the Selection tab) and an empty
 **Settings** page.
+
+Datasets are loaded and written with json-c against the JSON schema:
+required properties are enforced, unknown properties are rejected
+(`additionalProperties: false`), coordinates require both latitude and
+longitude, ids may be strings or integers, and every failure message names
+the JSON path of the offending value.
 
 The Analysis page is driven by the shared DAG engine in `dagcore.h/.c`:
 node identities, dependency ordering, statuses with skip rationales,

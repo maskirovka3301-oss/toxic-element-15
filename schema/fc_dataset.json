@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.org/schemas/measurement-dataset.schema.json",
+  "title": "Measurement Dataset",
+  "description": "A dataset containing any number of sessions; each session any number of rounds; each round any number of subjects; each subject any number of measurements. A measurement is a number giving the value in Hz.",
+  "type": "object",
+  "required": ["dataset_id", "source_file", "title", "sessions"],
+  "properties": {
+    "dataset_id": { "type": "string" },
+    "source_file": { "type": "string" },
+    "title": { "type": "string" },
+    "notes": {
+      "type": "array",
+      "description": "Free-form notes. Any number of entries (including zero).",
+      "items": { "type": "string" }
+    },
+    "sessions": {
+      "type": "array",
+      "description": "Any number of sessions (including zero).",
+      "minItems": 0,
+      "items": { "$ref": "#/$defs/session" }
+    },
+    "unassigned_measurements": {
+      "type": "array",
+      "description": "Measurements not tied to a session/round/subject. Any number (including zero).",
+      "minItems": 0,
+      "items": { "$ref": "#/$defs/measurement" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "session": {
+      "type": "object",
+      "description": "A session. Contains any number of rounds.",
+      "required": ["session_id", "rounds"],
+      "properties": {
+        "session_id": { "type": ["string", "integer"] },
+        "rounds": {
+          "type": "array",
+          "description": "Any number of rounds (including zero).",
+          "minItems": 0,
+          "items": { "$ref": "#/$defs/round" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "round": {
+      "type": "object",
+      "description": "A round. Contains metadata and any number of subjects.",
+      "required": ["round_id", "subjects"],
+      "properties": {
+        "round_id": { "type": ["string", "integer"] },
+        "location": { "type": ["string", "null"] },
+        "date": { "type": ["string", "null"] },
+        "coordinates": {
+          "oneOf": [{ "$ref": "#/$defs/coordinates" }, { "type": "null" }]
+        },
+        "closest_towers_enb_ids": {
+          "type": ["array", "null"],
+          "description": "Any number of tower IDs, or null if unknown.",
+          "items": { "type": ["string", "integer"] }
+        },
+        "context": { "type": ["string", "null"] },
+        "subjects_listed": {
+          "type": "array",
+          "description": "Subjects named in the source, including ones with no measurements. Any number (including zero).",
+          "items": { "type": "string" }
+        },
+        "subjects": {
+          "type": "array",
+          "description": "Any number of subjects with measurements (including zero).",
+          "minItems": 0,
+          "items": { "$ref": "#/$defs/subject" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "coordinates": {
+      "type": "object",
+      "required": ["latitude", "longitude"],
+      "properties": {
+        "latitude": { "type": "number" },
+        "longitude": { "type": "number" }
+      },
+      "additionalProperties": false
+    },
+    "subject": {
+      "type": "object",
+      "description": "A subject. Contains any number of measurements.",
+      "required": ["name", "measurements"],
+      "properties": {
+        "name": { "type": "string" },
+        "measurements": {
+          "type": "array",
+          "description": "Any number of measurements (including zero). Each entry is a value in Hz.",
+          "minItems": 0,
+          "items": { "$ref": "#/$defs/measurement" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "measurement": {
+      "type": "number",
+      "description": "A single measurement value in Hz."
+    }
+  }
+}

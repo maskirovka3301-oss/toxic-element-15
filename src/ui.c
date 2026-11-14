@@ -44,7 +44,7 @@
 #include "about_image.h"
 #include "fcdag.h"
 #include "fcreport.h"
-#include "freqseries.h"
+#include "fcdataset.h"
 #include "fit.h"
 #include "wav.h"
 
@@ -6278,7 +6278,7 @@ void ui_init(Ui *ui, IqSource *src, WaterfallCache *cache)
     ui->ss_estimator = 0;      /* Fluctuations */
     ui->last_progress = -1;
     ui->stream_buffer_fraction = 1.0 / 8.0;
-    fsl_init(&ui->fc_series);
+    fcd_list_init(&ui->fc_datasets);
     ui->streambuf = sb_create(cache, ui->stream_buffer_fraction);
     if (ui->streambuf != NULL) sb_wait_ready(ui->streambuf, 2000);
     ui->renderbuf = rb_create(cache, ui->streambuf);
@@ -7261,248 +7261,550 @@ static GtkWidget *build_demodulate_page(Ui *ui)
     return page;
 }
 
-/* --- Frequency Counter tab --------------------------------------------- */
+/* --- Frequency Counter tab (schema/fc_dataset.json) -------------------- */
 
 enum {
-    FC_COL_LABEL = 0,
-    FC_COL_DATETIME,
-    FC_COL_LOCATION,
-    FC_COL_POINTS,
-    FC_COL_NOTES,
-    FC_COL_COUNT
+    FC_T_ITEM = 0,      /* tree label                                   */
+    FC_T_ID,            /* schema id / name                            */
+    FC_T_DETAILS,       /* short schema summary                        */
+    FC_T_MEAS,          /* measurement count                           */
+    FC_T_DATASET,       /* dataset index (-1: not a dataset node)      */
+    FC_T_SESSION,       /* session index inside the dataset            */
+    FC_T_ROUND,         /* round index inside the session              */
+    FC_T_SUBJECT,       /* subject index inside the round              */
+    FC_T_KIND,          /* FcNodeKind                                  */
+    FC_T_COUNT
 };
 
-/* Async analysis job (mirrors the Spectrum tab's worker/idle delivery). */
+typedef enum {
+    FC_KIND_DATASET = 0,
+    FC_KIND_SESSION,
+    FC_KIND_ROUND,
+    FC_KIND_SUBJECT,
+    FC_KIND_UNASSIGNED
+} FcNodeKind;
+
+/* Async analysis job: a deep copy of the datasets is analysed in a worker
+ * thread (the engine only reads it) and the report is delivered back. */
 typedef struct {
-    Ui             *ui;
-    FreqSeriesList  snapshot;
-    volatile int    cancelled;
-    char           *text;
-    char           *markdown;
-    char           *html;
-    char            err[256];
-    size_t          nodes;
-    double          elapsed_s;
+    Ui            *ui;
+    FcDatasetList  snapshot;
+    volatile int   cancelled;
+    char          *text;
+    char          *markdown;
+    char          *html;
+    char           err[256];
+    size_t         nodes;
+    double         elapsed_s;
 } FcJob;
 
 static gboolean fc_deliver(gpointer data);
 static gpointer fc_worker(gpointer data);
 
-static int fc_selected_index(const Ui *ui)
+/* Case-insensitive substring test. */
+static bool fc_icontains(const char *haystack, const char *needle)
 {
-    GtkTreeSelection *sel;
-    GtkTreeIter iter;
-    GtkTreeModel *model;
-    GtkTreePath *path;
-    int index = -1;
+    char *low_h, *low_n;
+    bool found;
 
-    if (ui->fc_view == NULL) return -1;
-    sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(ui->fc_view));
-    if (!gtk_tree_selection_get_selected(sel, &model, &iter)) return -1;
-    path = gtk_tree_model_get_path(model, &iter);
-    if (path != NULL) {
-        index = gtk_tree_path_get_indices(path)[0];
-        gtk_tree_path_free(path);
-    }
-    return index;
+    if (needle == NULL || needle[0] == '\0') return true;
+    if (haystack == NULL) return false;
+    low_h = g_utf8_strdown(haystack, -1);
+    low_n = g_utf8_strdown(needle, -1);
+    found = low_h != NULL && low_n != NULL && strstr(low_h, low_n) != NULL;
+    g_free(low_h);
+    g_free(low_n);
+    return found;
 }
 
-/* Refresh the list view from the session array (selection preserved when
- * possible); returns the selected index (-1 when none). */
-static int fc_refresh_store(Ui *ui, int select_index)
+/* ---- schema-aware details text ---------------------------------------- */
+
+static void details_add(GString *s, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+
+static void details_add(GString *s, const char *fmt, ...)
 {
-    GtkTreeSelection *sel;
+    va_list ap;
 
-    if (ui->fc_store == NULL) return -1;
-    gtk_list_store_clear(ui->fc_store);
-    for (size_t i = 0; i < ui->fc_series.count; i++) {
-        const FreqSession *s = &ui->fc_series.items[i];
-        GtkTreeIter it;
-        char location[64];
-        char points[32];
+    va_start(ap, fmt);
+    g_string_append_vprintf(s, fmt, ap);
+    va_end(ap);
+}
 
-        if (s->has_location) {
-            snprintf(location, sizeof(location), "%.5f, %.5f", s->lat, s->lon);
-        } else {
-            snprintf(location, sizeof(location), "%s", "—");
+static void details_measurements(GString *s, const char *label,
+                                 const double *values, size_t n)
+{
+    double lo = 0.0, hi = 0.0, mean = 0.0;
+
+    if (fc_stats(values, n, &lo, &hi, &mean)) {
+        details_add(s, "%-20s %zu measurements, min %.3f Hz, max %.3f Hz, "
+                       "mean %.3f Hz\n", label, n, lo, hi, mean);
+        details_add(s, "%-20s first values:", "");
+        for (size_t i = 0; i < n && i < 8; i++) {
+            details_add(s, " %.3f", values[i]);
         }
-        snprintf(points, sizeof(points), "%zu", s->count);
-        gtk_list_store_append(ui->fc_store, &it);
-        gtk_list_store_set(ui->fc_store, &it,
-                           FC_COL_LABEL, s->label != NULL ? s->label : "",
-                           FC_COL_DATETIME,
-                           s->datetime != NULL ? s->datetime : "",
-                           FC_COL_LOCATION, location,
-                           FC_COL_POINTS, points,
-                           FC_COL_NOTES, s->notes != NULL ? s->notes : "",
-                           -1);
+        if (n > 8) details_add(s, " …");
+        details_add(s, "\n");
+    } else {
+        details_add(s, "%-20s no measurements\n", label);
     }
-    if (select_index >= 0 && (size_t)select_index < ui->fc_series.count) {
-        GtkTreePath *path = gtk_tree_path_new_from_indices(select_index, -1);
-
-        sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(ui->fc_view));
-        gtk_tree_selection_select_path(sel, path);
-        gtk_tree_view_set_cursor(GTK_TREE_VIEW(ui->fc_view), path, NULL, FALSE);
-        gtk_tree_path_free(path);
-    }
-    return select_index >= 0 && (size_t)select_index < ui->fc_series.count
-               ? select_index : -1;
 }
 
-/* Loading the session metadata into the entry widgets must not write it
- * back: this guard is raised while the widgets are being populated. */
-static bool fc_loading_meta;
-
-static void fc_set_entry(GtkWidget *entry, const char *text)
+static GString *fc_details_for(const FcDatasetList *list, FcNodeKind kind,
+                               int di, int si, int ri, int ji)
 {
-    if (entry == NULL) return;
-    gtk_entry_set_text(GTK_ENTRY(entry), text != NULL ? text : "");
-}
+    GString *s = g_string_new("");
 
-/* Show one session's metadata in the property editor (or clear it). */
-static void fc_show_session(Ui *ui, int index)
-{
-    bool have = index >= 0 && (size_t)index < ui->fc_series.count;
-    const FreqSession *s = have ? &ui->fc_series.items[index] : NULL;
-    char lat[32] = "";
-    char lon[32] = "";
-
-    fc_loading_meta = true;
-    if (s != NULL && s->has_location) {
-        snprintf(lat, sizeof(lat), "%.6f", s->lat);
-        snprintf(lon, sizeof(lon), "%.6f", s->lon);
+    if (list == NULL || di < 0 || (size_t)di >= list->count) {
+        g_string_append(s, "No selection.\n");
+        return s;
     }
-    fc_set_entry(ui->fc_label_entry, s != NULL ? s->label : "");
-    fc_set_entry(ui->fc_lat_entry, lat);
-    fc_set_entry(ui->fc_lon_entry, lon);
-    fc_set_entry(ui->fc_datetime_entry, s != NULL ? s->datetime : "");
-    fc_set_entry(ui->fc_notes_entry, s != NULL ? s->notes : "");
-    if (ui->fc_label_entry != NULL) {
-        gtk_widget_set_sensitive(ui->fc_label_entry, have);
-        gtk_widget_set_sensitive(ui->fc_lat_entry, have);
-        gtk_widget_set_sensitive(ui->fc_lon_entry, have);
-        gtk_widget_set_sensitive(ui->fc_datetime_entry, have);
-        gtk_widget_set_sensitive(ui->fc_notes_entry, have);
-    }
-    if (ui->fc_remove_btn != NULL) {
-        gtk_widget_set_sensitive(ui->fc_remove_btn, have);
-    }
-    fc_loading_meta = false;
-}
-
-static void on_fc_selection_changed(GtkTreeSelection *sel, gpointer user_data)
-{
-    Ui *ui = (Ui *)user_data;
-    GtkTreeModel *model;
-    GtkTreeIter iter;
-    int index = -1;
-
-    (void)sel;
-    if (ui->fc_view != NULL &&
-        gtk_tree_selection_get_selected(
-            gtk_tree_view_get_selection(GTK_TREE_VIEW(ui->fc_view)), &model,
-            &iter)) {
-        GtkTreePath *path = gtk_tree_model_get_path(model, &iter);
-
-        if (path != NULL) {
-            index = gtk_tree_path_get_indices(path)[0];
-            gtk_tree_path_free(path);
-        }
-    }
-    fc_show_session(ui, index);
-}
-
-/* Apply the property entries to the selected session and refresh its row. */
-static void fc_apply_metadata(Ui *ui)
-{
-    int index;
-    FreqSession *s;
-    char lat_text[64], lon_text[64];
-    double lat = 0.0, lon = 0.0;
-    bool has_location = false;
-
-    if (fc_loading_meta) return;
-    index = fc_selected_index(ui);
-    if (index < 0 || (size_t)index >= ui->fc_series.count) return;
-    s = &ui->fc_series.items[index];
-    fsl_set_label(s, gtk_entry_get_text(GTK_ENTRY(ui->fc_label_entry)));
-    fsl_set_datetime(s,
-                     gtk_entry_get_text(GTK_ENTRY(ui->fc_datetime_entry)));
-    fsl_set_notes(s, gtk_entry_get_text(GTK_ENTRY(ui->fc_notes_entry)));
-    snprintf(lat_text, sizeof(lat_text), "%s",
-             gtk_entry_get_text(GTK_ENTRY(ui->fc_lat_entry)));
-    snprintf(lon_text, sizeof(lon_text), "%s",
-             gtk_entry_get_text(GTK_ENTRY(ui->fc_lon_entry)));
-    if (lat_text[0] != '\0' && lon_text[0] != '\0') {
-        char *end = NULL;
-
-        lat = g_ascii_strtod(lat_text, &end);
-        if (end != lat_text) {
-            end = NULL;
-            lon = g_ascii_strtod(lon_text, &end);
-            if (end != lon_text) has_location = true;
-        }
-    }
-    fsl_set_location(s, has_location, lat, lon);
     {
-        GtkTreeIter it;
-        GtkTreePath *path = gtk_tree_path_new_from_indices(index, -1);
-        char location[64];
+        const FcDataset *ds = &list->items[di];
 
-        if (s->has_location) {
-            snprintf(location, sizeof(location), "%.5f, %.5f", s->lat, s->lon);
-        } else {
-            snprintf(location, sizeof(location), "%s", "—");
+        switch (kind) {
+        case FC_KIND_DATASET:
+            details_add(s, "DATASET\n");
+            details_add(s, "%-20s %s\n", "dataset_id:", ds->dataset_id);
+            details_add(s, "%-20s %s\n", "source_file:", ds->source_file);
+            details_add(s, "%-20s %s\n", "title:", ds->title);
+            details_add(s, "%-20s %zu\n", "notes:", ds->n_notes);
+            for (size_t i = 0; i < ds->n_notes; i++) {
+                details_add(s, "  note %zu: %s\n", i + 1, ds->notes[i]);
+            }
+            details_add(s, "%-20s %zu\n", "sessions:", ds->n_sessions);
+            details_add(s, "%-20s %zu\n", "rounds:", fcd_count_rounds(ds));
+            details_add(s, "%-20s %zu\n", "subjects:", fcd_count_subjects(ds));
+            details_add(s, "%-20s %zu\n", "measurements:",
+                        fcd_count_measurements(ds));
+            if (ds->n_unassigned > 0) {
+                details_add(s, "\nUNASSIGNED MEASUREMENTS\n");
+                details_measurements(s, "unassigned:", ds->unassigned,
+                                     ds->n_unassigned);
+            }
+            details_add(s, "\nSESSIONS\n");
+            for (size_t i = 0; i < ds->n_sessions; i++) {
+                details_add(s, "  session %s — %zu rounds\n",
+                            ds->sessions[i].session_id.text,
+                            ds->sessions[i].n_rounds);
+            }
+            break;
+        case FC_KIND_SESSION:
+            if (si < 0 || (size_t)si >= ds->n_sessions) {
+                g_string_append(s, "No session.\n");
+                break;
+            }
+            {
+                const FcSession *ss = &ds->sessions[si];
+
+                details_add(s, "SESSION\n");
+                details_add(s, "%-20s %s\n", "session_id:", ss->session_id.text);
+                details_add(s, "%-20s %zu\n", "rounds:", ss->n_rounds);
+                for (size_t r = 0; r < ss->n_rounds; r++) {
+                    const FcRound *rr = &ss->rounds[r];
+
+                    details_add(s, "  round %s — %zu subjects, %zu listed\n",
+                                rr->round_id.text, rr->n_subjects,
+                                rr->n_listed);
+                }
+            }
+            break;
+        case FC_KIND_ROUND:
+            if (si < 0 || (size_t)si >= ds->n_sessions ||
+                ri < 0 || (size_t)ri >= ds->sessions[si].n_rounds) {
+                g_string_append(s, "No round.\n");
+                break;
+            }
+            {
+                const FcRound *rr = &ds->sessions[si].rounds[ri];
+
+                details_add(s, "ROUND\n");
+                details_add(s, "%-20s %s\n", "round_id:", rr->round_id.text);
+                details_add(s, "%-20s %s\n", "location:",
+                            rr->location != NULL ? rr->location : "(none)");
+                details_add(s, "%-20s %s\n", "date:",
+                            rr->date != NULL ? rr->date : "(none)");
+                if (rr->has_coordinates) {
+                    details_add(s, "%-20s %.6f, %.6f\n", "coordinates:",
+                                rr->latitude, rr->longitude);
+                } else {
+                    details_add(s, "%-20s %s\n", "coordinates:", "(none)");
+                }
+                details_add(s, "%-20s ", "closest towers:");
+                if (rr->towers_null) details_add(s, "(null)\n");
+                else if (rr->n_towers == 0) details_add(s, "(none)\n");
+                else {
+                    for (size_t i = 0; i < rr->n_towers; i++) {
+                        details_add(s, "%s%s", i > 0 ? ", " : "",
+                                    rr->towers[i]);
+                    }
+                    details_add(s, "\n");
+                }
+                details_add(s, "%-20s %s\n", "context:",
+                            rr->context != NULL ? rr->context : "(none)");
+                details_add(s, "%-20s %zu", "subjects listed:", rr->n_listed);
+                for (size_t i = 0; i < rr->n_listed; i++) {
+                    details_add(s, "%s%s", i > 0 ? ", " : " ",
+                                rr->subjects_listed[i]);
+                }
+                details_add(s, "\n\nSUBJECTS\n");
+                for (size_t j = 0; j < rr->n_subjects; j++) {
+                    const FcSubject *sj = &rr->subjects[j];
+                    GString *one = g_string_new("");
+
+                    details_measurements(one, sj->name, sj->measurements,
+                                         sj->count);
+                    details_add(s, "%s", one->str);
+                    g_string_free(one, TRUE);
+                }
+            }
+            break;
+        case FC_KIND_SUBJECT:
+            if (si < 0 || (size_t)si >= ds->n_sessions ||
+                ri < 0 || (size_t)ri >= ds->sessions[si].n_rounds ||
+                ji < 0 ||
+                (size_t)ji >= ds->sessions[si].rounds[ri].n_subjects) {
+                g_string_append(s, "No subject.\n");
+                break;
+            }
+            {
+                const FcSubject *sj =
+                    &ds->sessions[si].rounds[ri].subjects[ji];
+
+                details_add(s, "SUBJECT\n");
+                details_add(s, "%-20s %s\n", "name:", sj->name);
+                details_measurements(s, "measurements:", sj->measurements,
+                                     sj->count);
+            }
+            break;
+        case FC_KIND_UNASSIGNED:
+            details_add(s, "UNASSIGNED MEASUREMENTS\n");
+            details_measurements(s, "unassigned:", ds->unassigned,
+                                 ds->n_unassigned);
+            break;
         }
-        if (gtk_tree_model_get_iter(GTK_TREE_MODEL(ui->fc_store), &it, path)) {
-            gtk_list_store_set(ui->fc_store, &it,
-                               FC_COL_LABEL, s->label != NULL ? s->label : "",
-                               FC_COL_DATETIME,
-                               s->datetime != NULL ? s->datetime : "",
-                               FC_COL_LOCATION, location,
-                               FC_COL_NOTES, s->notes != NULL ? s->notes : "",
-                               -1);
+    }
+    return s;
+}
+
+/* ---- tree building ---------------------------------------------------- */
+
+static bool fc_dataset_matches(const FcDataset *ds, const char *filter)
+{
+    if (filter == NULL || filter[0] == '\0') return true;
+    if (fc_icontains(ds->dataset_id, filter) ||
+        fc_icontains(ds->source_file, filter) ||
+        fc_icontains(ds->title, filter)) {
+        return true;
+    }
+    for (size_t i = 0; i < ds->n_notes; i++) {
+        if (fc_icontains(ds->notes[i], filter)) return true;
+    }
+    return false;
+}
+
+static bool fc_session_matches(const FcDataset *ds, size_t si,
+                               const char *filter)
+{
+    if (filter == NULL || filter[0] == '\0') return true;
+    if (fc_icontains(ds->sessions[si].session_id.text, filter)) return true;
+    for (size_t r = 0; r < ds->sessions[si].n_rounds; r++) {
+        const FcRound *rr = &ds->sessions[si].rounds[r];
+
+        if (fc_icontains(rr->round_id.text, filter) ||
+            fc_icontains(rr->location, filter) || fc_icontains(rr->date, filter) ||
+            fc_icontains(rr->context, filter)) {
+            return true;
         }
-        gtk_tree_path_free(path);
+        for (size_t t = 0; t < rr->n_towers; t++) {
+            if (fc_icontains(rr->towers[t], filter)) return true;
+        }
+        for (size_t l = 0; l < rr->n_listed; l++) {
+            if (fc_icontains(rr->subjects_listed[l], filter)) return true;
+        }
+        for (size_t j = 0; j < rr->n_subjects; j++) {
+            if (fc_icontains(rr->subjects[j].name, filter)) return true;
+        }
+    }
+    return false;
+}
+
+static bool fc_round_matches(const FcRound *rr, const char *filter)
+{
+    if (filter == NULL || filter[0] == '\0') return true;
+    if (fc_icontains(rr->round_id.text, filter) ||
+        fc_icontains(rr->location, filter) || fc_icontains(rr->date, filter) ||
+        fc_icontains(rr->context, filter)) {
+        return true;
+    }
+    for (size_t t = 0; t < rr->n_towers; t++) {
+        if (fc_icontains(rr->towers[t], filter)) return true;
+    }
+    for (size_t l = 0; l < rr->n_listed; l++) {
+        if (fc_icontains(rr->subjects_listed[l], filter)) return true;
+    }
+    for (size_t j = 0; j < rr->n_subjects; j++) {
+        if (fc_icontains(rr->subjects[j].name, filter)) return true;
+    }
+    return false;
+}
+
+static bool fc_subject_matches(const FcSubject *sj, const char *filter)
+{
+    return filter == NULL || filter[0] == '\0' ||
+           fc_icontains(sj->name, filter);
+}
+
+static void fc_tree_append(Ui *ui, GtkTreeIter *it, GtkTreeIter *parent,
+                           const char *item, const char *id,
+                           const char *details, size_t measurements,
+                           int kind, int di, int si, int ri, int ji)
+{
+    gtk_tree_store_append(ui->fc_model, it, parent);
+    gtk_tree_store_set(ui->fc_model, it, FC_T_ITEM, item, FC_T_ID, id,
+                       FC_T_DETAILS, details, FC_T_MEAS,
+                       (int)(measurements > 999999 ? 999999 : measurements),
+                       FC_T_KIND, kind, FC_T_DATASET, di, FC_T_SESSION, si,
+                       FC_T_ROUND, ri, FC_T_SUBJECT, ji, -1);
+}
+
+static void fc_tree_build(Ui *ui, const char *filter)
+{
+    gtk_tree_store_clear(ui->fc_model);
+    for (size_t d = 0; d < ui->fc_datasets.count; d++) {
+        const FcDataset *ds = &ui->fc_datasets.items[d];
+        GtkTreeIter dit;
+        char buf[512];
+        bool include = fc_dataset_matches(ds, filter);
+
+        for (size_t s = 0; s < ds->n_sessions && !include; s++) {
+            include = fc_session_matches(ds, s, filter);
+        }
+        if (!include) continue;
+        snprintf(buf, sizeof(buf), "dataset: %s", ds->title);
+        {
+            char details[256];
+
+            snprintf(details, sizeof(details), "%zu sessions · %zu rounds · "
+                                               "%zu subjects",
+                     ds->n_sessions, fcd_count_rounds(ds),
+                     fcd_count_subjects(ds));
+            fc_tree_append(ui, &dit, NULL, buf, ds->dataset_id, details,
+                           fcd_count_measurements(ds), FC_KIND_DATASET,
+                           (int)d, -1, -1, -1);
+        }
+        for (size_t s = 0; s < ds->n_sessions; s++) {
+            const FcSession *ss = &ds->sessions[s];
+            GtkTreeIter sit;
+            char sid[512];
+            char sdetails[256];
+            bool s_include = fc_session_matches(ds, s, filter);
+
+            if (!s_include) continue;
+            snprintf(sid, sizeof(sid), "session %s", ss->session_id.text);
+            snprintf(sdetails, sizeof(sdetails), "%zu rounds", ss->n_rounds);
+            fc_tree_append(ui, &sit, &dit, sid, ss->session_id.text,
+                           sdetails, 0, FC_KIND_SESSION, (int)d, (int)s,
+                           -1, -1);
+            for (size_t r = 0; r < ss->n_rounds; r++) {
+                const FcRound *rr = &ss->rounds[r];
+                GtkTreeIter rit;
+                char rid[512];
+                char rdetails[512];
+                bool r_include =
+                    filter == NULL || filter[0] == '\0' ||
+                    fc_round_matches(rr, filter) || !s_include;
+
+                if (!r_include) continue;
+                snprintf(rid, sizeof(rid), "round %s", rr->round_id.text);
+                snprintf(rdetails, sizeof(rdetails), "%s%s%s · %zu subjects",
+                         rr->has_coordinates ? "coords · " : "",
+                         rr->date != NULL ? rr->date : "no date",
+                         rr->location != NULL ? "" : "",
+                         rr->n_subjects);
+                fc_tree_append(ui, &rit, &sit, rid, rr->round_id.text,
+                               rdetails, 0, FC_KIND_ROUND, (int)d, (int)s,
+                               (int)r, -1);
+                for (size_t j = 0; j < rr->n_subjects; j++) {
+                    const FcSubject *sj = &rr->subjects[j];
+                    GtkTreeIter jit;
+                    char jdetails[256];
+
+                    if (!(filter == NULL || filter[0] == '\0' ||
+                          fc_subject_matches(sj, filter) || !r_include)) {
+                        continue;
+                    }
+                    snprintf(jdetails, sizeof(jdetails),
+                             "subject · %zu measurements", sj->count);
+                    fc_tree_append(ui, &jit, &rit, sj->name, sj->name,
+                                   jdetails, sj->count, FC_KIND_SUBJECT,
+                                   (int)d, (int)s, (int)r, (int)j);
+                }
+            }
+        }
+        if (ds->n_unassigned > 0) {
+            GtkTreeIter uit;
+
+            fc_tree_append(ui, &uit, &dit, "unassigned measurements", "",
+                           "not tied to a session", ds->n_unassigned,
+                           FC_KIND_UNASSIGNED, (int)d, -1, -1, -1);
+        }
     }
 }
 
-static void on_fc_meta_changed(GtkEditable *editable, gpointer user_data)
+static void fc_refresh_status(Ui *ui)
 {
-    (void)editable;
-    fc_apply_metadata((Ui *)user_data);
+    char text[256];
+
+    if (ui->fc_datasets.count == 0) {
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
+                           "No datasets loaded.");
+        return;
+    }
+    snprintf(text, sizeof(text),
+             "%zu dataset%s · %zu sessions · %zu rounds · %zu subjects · "
+             "%zu measurements", ui->fc_datasets.count,
+             ui->fc_datasets.count == 1 ? "" : "s",
+             fcd_list_count_sessions(&ui->fc_datasets),
+             fcd_list_count_rounds(&ui->fc_datasets),
+             fcd_list_count_subjects(&ui->fc_datasets),
+             fcd_list_count_measurements(&ui->fc_datasets));
+    gtk_label_set_text(GTK_LABEL(ui->fc_status_label), text);
 }
 
-/* Load one or more measurement files and append them as sessions. */
+static void fc_rebuild(Ui *ui, bool expand)
+{
+    const char *filter = ui->fc_search_entry != NULL
+                             ? gtk_entry_get_text(GTK_ENTRY(ui->fc_search_entry))
+                             : "";
+    int di = -1;
+
+    /* remember the selected dataset so the tree can be re-focused */
+    {
+        GtkTreeSelection *sel = gtk_tree_view_get_selection(
+            GTK_TREE_VIEW(ui->fc_view));
+        GtkTreeModel *model;
+        GtkTreeIter it;
+
+        if (gtk_tree_selection_get_selected(sel, &model, &it)) {
+            gtk_tree_model_get(model, &it, FC_T_DATASET, &di, -1);
+        }
+    }
+    fc_tree_build(ui, filter);
+    if (expand || (filter != NULL && filter[0] != '\0')) {
+        gtk_tree_view_expand_all(GTK_TREE_VIEW(ui->fc_view));
+    } else {
+        gtk_tree_view_collapse_all(GTK_TREE_VIEW(ui->fc_view));
+    }
+    if (di >= 0) {
+        GtkTreeIter root;
+
+        if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(ui->fc_model),
+                                          &root)) {
+            int guard = 0;
+
+            do {
+                int row_di = -1;
+
+                gtk_tree_model_get(GTK_TREE_MODEL(ui->fc_model), &root,
+                                   FC_T_DATASET, &row_di, -1);
+                if (row_di == di) {
+                    GtkTreeSelection *sel = gtk_tree_view_get_selection(
+                        GTK_TREE_VIEW(ui->fc_view));
+
+                    gtk_tree_selection_select_iter(sel, &root);
+                    break;
+                }
+            } while (++guard < 10000 &&
+                     gtk_tree_model_iter_next(GTK_TREE_MODEL(ui->fc_model),
+                                              &root));
+        }
+    }
+    fc_refresh_status(ui);
+    if (ui->fc_save_btn != NULL) {
+        gtk_widget_set_sensitive(ui->fc_save_btn, ui->fc_datasets.count > 0);
+    }
+}
+
+/* Selected node: kind and indices. */
+static bool fc_selection(Ui *ui, int *kind, int *di, int *si, int *ri, int *ji)
+{
+    GtkTreeSelection *sel;
+    GtkTreeModel *model;
+    GtkTreeIter it;
+    int k = -1;
+
+    if (ui->fc_view == NULL) return false;
+    sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(ui->fc_view));
+    if (!gtk_tree_selection_get_selected(sel, &model, &it)) return false;
+    *di = -1;
+    *si = -1;
+    *ri = -1;
+    *ji = -1;
+    gtk_tree_model_get(model, &it, FC_T_KIND, &k, FC_T_DATASET, di,
+                       FC_T_SESSION, si, FC_T_ROUND, ri, FC_T_SUBJECT, ji, -1);
+    if (k < 0) return false;
+    *kind = k;
+    return true;
+}
+
+static void fc_show_details(Ui *ui)
+{
+    GString *text;
+    int kind = FC_KIND_DATASET, di = -1, si = -1, ri = -1, ji = -1;
+
+    if (ui->fc_details_view == NULL) return;
+    if (!fc_selection(ui, &kind, &di, &si, &ri, &ji)) {
+        di = -1;
+        kind = FC_KIND_DATASET;
+    }
+    text = fc_details_for(&ui->fc_datasets, (FcNodeKind)kind, di, si, ri, ji);
+    gtk_text_buffer_set_text(
+        gtk_text_view_get_buffer(GTK_TEXT_VIEW(ui->fc_details_view)),
+        text->str, -1);
+    g_string_free(text, TRUE);
+}
+
+static void on_fc_tree_selection_changed(GtkTreeSelection *sel,
+                                         gpointer user_data)
+{
+    (void)sel;
+    fc_show_details((Ui *)user_data);
+}
+
+/* ---- loading / saving / removing -------------------------------------- */
+
 static void fc_load_paths(Ui *ui, char *const *paths, size_t n_paths)
 {
-    size_t first = ui->fc_series.count;
-    size_t loaded = 0;
+    size_t loaded = 0, first = ui->fc_datasets.count;
     char last_err[256] = "";
 
     for (size_t i = 0; i < n_paths; i++) {
-        char err[256] = "";
+        char err[512] = "";
 
-        if (fsl_load_file(&ui->fc_series, paths[i], err, sizeof(err))) {
+        if (fcd_load_file(&ui->fc_datasets, paths[i], err, sizeof(err))) {
             loaded++;
         } else {
             snprintf(last_err, sizeof(last_err), "%s", err);
         }
     }
+    fc_rebuild(ui, false);
     if (loaded > 0) {
-        fc_refresh_store(ui, (int)first);
-        fc_show_session(ui, (int)first);
+        GtkTreePath *path = gtk_tree_path_new_from_indices((int)first, -1);
+
+        gtk_tree_view_set_cursor(GTK_TREE_VIEW(ui->fc_view), path, NULL, FALSE);
+        gtk_tree_path_free(path);
     }
     if (ui->fc_status_label != NULL) {
         char text[512];
 
         if (loaded > 0 && last_err[0] == '\0') {
-            snprintf(text, sizeof(text),
-                     "Loaded %zu session%s (%zu measurements).", loaded,
-                     loaded == 1 ? "" : "s", fsl_total_points(&ui->fc_series));
+            snprintf(text, sizeof(text), "Loaded %zu dataset%s (%zu "
+                                         "measurements).", loaded,
+                     loaded == 1 ? "" : "s",
+                     fcd_list_count_measurements(&ui->fc_datasets));
         } else if (loaded > 0) {
-            snprintf(text, sizeof(text),
-                     "Loaded %zu session%s; %s", loaded,
+            snprintf(text, sizeof(text), "Loaded %zu dataset%s; %s", loaded,
                      loaded == 1 ? "" : "s", last_err);
         } else {
             snprintf(text, sizeof(text), "%s",
@@ -7521,20 +7823,22 @@ static void on_fc_load_clicked(GtkButton *button, gpointer user_data)
 
     (void)button;
     dialog = gtk_file_chooser_dialog_new(
-        "Load frequency measurements", GTK_WINDOW(ui->window),
+        "Load measurement dataset", GTK_WINDOW(ui->window),
         GTK_FILE_CHOOSER_ACTION_OPEN, "Cancel", GTK_RESPONSE_CANCEL, "Open",
         GTK_RESPONSE_ACCEPT, NULL);
     gtk_file_chooser_set_select_multiple(GTK_FILE_CHOOSER(dialog), TRUE);
     filter = gtk_file_filter_new();
-    gtk_file_filter_set_name(filter, "Text files");
-    gtk_file_filter_add_pattern(filter, "*.txt");
-    gtk_file_filter_add_pattern(filter, "*.dat");
-    gtk_file_filter_add_pattern(filter, "*.csv");
+    gtk_file_filter_set_name(filter, "Measurement datasets (JSON)");
+    gtk_file_filter_add_pattern(filter, "*.json");
+    gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), filter);
+    filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(filter, "All files");
+    gtk_file_filter_add_pattern(filter, "*");
     gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), filter);
     response = gtk_dialog_run(GTK_DIALOG(dialog));
     if (response == GTK_RESPONSE_ACCEPT) {
-        GSList *names = gtk_file_chooser_get_filenames(GTK_FILE_CHOOSER(
-            dialog));
+        GSList *names = gtk_file_chooser_get_filenames(
+            GTK_FILE_CHOOSER(dialog));
         size_t n = g_slist_length(names);
         char **paths = n > 0 ? calloc(n, sizeof(*paths)) : NULL;
 
@@ -7553,25 +7857,86 @@ static void on_fc_load_clicked(GtkButton *button, gpointer user_data)
     gtk_widget_destroy(dialog);
 }
 
+static char *fc_suggested_filename(const FcDataset *ds)
+{
+    const char *base = ds->dataset_id != NULL && ds->dataset_id[0] != '\0'
+                           ? ds->dataset_id
+                           : (ds->title != NULL ? ds->title : "dataset");
+    GString *name = g_string_new("");
+    char *out;
+
+    for (const char *p = base; *p != '\0'; p++) {
+        if (g_ascii_isalnum(*p) || *p == '-' || *p == '_') {
+            g_string_append_c(name, *p);
+        } else {
+            g_string_append_c(name, '_');
+        }
+    }
+    g_string_append(name, ".json");
+    out = g_strdup(name->str);
+    g_string_free(name, TRUE);
+    return out;
+}
+
+static void on_fc_save_clicked(GtkButton *button, gpointer user_data)
+{
+    Ui *ui = (Ui *)user_data;
+    int kind, di = -1, si = -1, ri = -1, ji = -1;
+    GtkWidget *dialog;
+    char *suggested;
+
+    (void)button;
+    if (!fc_selection(ui, &kind, &di, &si, &ri, &ji) || di < 0) {
+        if (ui->fc_datasets.count == 0) return;
+        di = 0;
+    }
+    suggested = fc_suggested_filename(&ui->fc_datasets.items[di]);
+    dialog = gtk_file_chooser_dialog_new(
+        "Save measurement dataset", GTK_WINDOW(ui->window),
+        GTK_FILE_CHOOSER_ACTION_SAVE, "Cancel", GTK_RESPONSE_CANCEL, "Save",
+        GTK_RESPONSE_ACCEPT, NULL);
+    gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dialog), suggested);
+    g_free(suggested);
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char *filename = gtk_file_chooser_get_filename(
+            GTK_FILE_CHOOSER(dialog));
+        char err[512] = "";
+
+        if (filename != NULL &&
+            fcd_save_file(&ui->fc_datasets.items[di], filename, err,
+                          sizeof(err))) {
+            char msg[1024];
+
+            snprintf(msg, sizeof(msg), "Saved dataset: %s", filename);
+            gtk_label_set_text(GTK_LABEL(ui->fc_status_label), msg);
+        } else {
+            char msg[1024];
+
+            snprintf(msg, sizeof(msg), "%s",
+                     err[0] != '\0' ? err : "Cannot save the dataset.");
+            gtk_label_set_text(GTK_LABEL(ui->fc_status_label), msg);
+        }
+        g_free(filename);
+    }
+    gtk_widget_destroy(dialog);
+}
+
 static void on_fc_remove_clicked(GtkButton *button, gpointer user_data)
 {
     Ui *ui = (Ui *)user_data;
-    int index = fc_selected_index(ui);
+    int kind, di = -1, si = -1, ri = -1, ji = -1;
 
     (void)button;
-    if (index < 0) return;
-    fsl_remove(&ui->fc_series, (size_t)index);
-    {
-        int next = index < (int)ui->fc_series.count ? index : -1;
-        int sel = fc_refresh_store(ui, next);
-
-        fc_show_session(ui, sel);
-    }
+    if (!fc_selection(ui, &kind, &di, &si, &ri, &ji) || di < 0) return;
+    fcd_list_remove(&ui->fc_datasets, (size_t)di);
+    fc_rebuild(ui, false);
+    fc_show_details(ui);
     if (ui->fc_status_label != NULL) {
-        gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
-                           ui->fc_series.count == 0
-                               ? "No sessions loaded."
-                               : "Session removed.");
+        char msg[256];
+
+        snprintf(msg, sizeof(msg), "Dataset removed (%zu left).",
+                 ui->fc_datasets.count);
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label), msg);
     }
 }
 
@@ -7580,16 +7945,31 @@ static void on_fc_remove_all_clicked(GtkButton *button, gpointer user_data)
     Ui *ui = (Ui *)user_data;
 
     (void)button;
-    fsl_clear(&ui->fc_series);
-    fc_refresh_store(ui, -1);
-    fc_show_session(ui, -1);
-    if (ui->fc_status_label != NULL) {
-        gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
-                           "All sessions removed.");
-    }
+    fcd_list_clear(&ui->fc_datasets);
+    fc_rebuild(ui, false);
+    fc_show_details(ui);
+    gtk_label_set_text(GTK_LABEL(ui->fc_status_label), "All datasets removed.");
 }
 
-/* --- Analysis pane ------------------------------------------------------ */
+static void on_fc_search_changed(GtkEditable *editable, gpointer user_data)
+{
+    (void)editable;
+    fc_rebuild((Ui *)user_data, true);
+}
+
+static void on_fc_expand_clicked(GtkButton *button, gpointer user_data)
+{
+    (void)button;
+    gtk_tree_view_expand_all(GTK_TREE_VIEW(((Ui *)user_data)->fc_view));
+}
+
+static void on_fc_collapse_clicked(GtkButton *button, gpointer user_data)
+{
+    (void)button;
+    gtk_tree_view_collapse_all(GTK_TREE_VIEW(((Ui *)user_data)->fc_view));
+}
+
+/* ---- Analysis pane ---------------------------------------------------- */
 
 static void fc_show_report(Ui *ui)
 {
@@ -7618,7 +7998,7 @@ static gboolean fc_deliver(gpointer data)
         free(job->text);
         free(job->markdown);
         free(job->html);
-        fsl_clear(&job->snapshot);
+        fcd_list_clear(&job->snapshot);
         free(job);
         return G_SOURCE_REMOVE;
     }
@@ -7654,7 +8034,7 @@ static gboolean fc_deliver(gpointer data)
     free(job->text);
     free(job->markdown);
     free(job->html);
-    fsl_clear(&job->snapshot);
+    fcd_list_clear(&job->snapshot);
     free(job);
     return G_SOURCE_REMOVE;
 }
@@ -7671,8 +8051,7 @@ static gpointer fc_worker(gpointer data)
     } else {
         job->nodes = run->count;
         job->elapsed_s = run->elapsed_s;
-        fc_report(&job->snapshot, run, &job->text, &job->markdown,
-                  &job->html);
+        fc_report(&job->snapshot, run, &job->text, &job->markdown, &job->html);
         fc_dag_free(run);
     }
     g_idle_add(fc_deliver, job);
@@ -7685,54 +8064,44 @@ static void on_fc_analyze_clicked(GtkButton *button, gpointer user_data)
     FcJob *job;
 
     (void)button;
-    if (ui->fc_job != NULL) return;   /* already running */
+    if (ui->fc_job != NULL) return;
     job = calloc(1, sizeof(*job));
     if (job == NULL) {
-        if (ui->fc_status_label != NULL) {
-            gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
-                               "Out of memory starting the analysis.");
-        }
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
+                           "Out of memory starting the analysis.");
         return;
     }
     job->ui = ui;
-    if (!fsl_clone(&ui->fc_series, &job->snapshot)) {
-        fsl_clear(&job->snapshot);
+    if (!fcd_list_clone(&ui->fc_datasets, &job->snapshot)) {
+        fcd_list_clear(&job->snapshot);
         free(job);
-        if (ui->fc_status_label != NULL) {
-            gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
-                               "Out of memory copying the sessions.");
-        }
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
+                           "Out of memory copying the datasets.");
         return;
     }
     ui->fc_job = job;
-    if (ui->fc_status_label != NULL) {
+    {
         char text[256];
 
         snprintf(text, sizeof(text),
-                 "Running the analysis DAG over %zu session%s (%zu "
-                 "measurements)…", ui->fc_series.count,
-                 ui->fc_series.count == 1 ? "" : "s",
-                 fsl_total_points(&ui->fc_series));
+                 "Running the analysis DAG over %zu dataset%s (%zu "
+                 "measurements)…", ui->fc_datasets.count,
+                 ui->fc_datasets.count == 1 ? "" : "s",
+                 fcd_list_count_measurements(&ui->fc_datasets));
         gtk_label_set_text(GTK_LABEL(ui->fc_status_label), text);
     }
     if (ui->fc_progress != NULL) gtk_widget_set_visible(ui->fc_progress, TRUE);
-    if (ui->fc_analyze_btn != NULL) {
-        gtk_widget_set_sensitive(ui->fc_analyze_btn, FALSE);
-    }
+    gtk_widget_set_sensitive(ui->fc_analyze_btn, FALSE);
     if (g_thread_try_new("fc-analysis", fc_worker, job, NULL) == NULL) {
         ui->fc_job = NULL;
-        fsl_clear(&job->snapshot);
+        fcd_list_clear(&job->snapshot);
         free(job);
-        if (ui->fc_status_label != NULL) {
-            gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
-                               "Cannot start the analysis thread.");
-        }
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
+                           "Cannot start the analysis thread.");
         if (ui->fc_progress != NULL) {
             gtk_widget_set_visible(ui->fc_progress, FALSE);
         }
-        if (ui->fc_analyze_btn != NULL) {
-            gtk_widget_set_sensitive(ui->fc_analyze_btn, TRUE);
-        }
+        gtk_widget_set_sensitive(ui->fc_analyze_btn, TRUE);
     }
 }
 
@@ -7750,20 +8119,20 @@ static void on_fc_save_report(GtkButton *button, gpointer user_data)
     Ui *ui = (Ui *)user_data;
     GtkWidget *dialog;
     const char *text;
-    const char *ext;
 
     (void)button;
     switch (ui->fc_report_format) {
-    case 1: text = ui->fc_report_markdown; ext = "md"; break;
-    case 2: text = ui->fc_report_html; ext = "html"; break;
-    default: text = ui->fc_report_text; ext = "txt"; break;
+    case 1: text = ui->fc_report_markdown; break;
+    case 2: text = ui->fc_report_html; break;
+    default: text = ui->fc_report_text; break;
     }
     if (text == NULL) return;
     dialog = gtk_file_chooser_dialog_new(
         "Save frequency-counter report", GTK_WINDOW(ui->window),
         GTK_FILE_CHOOSER_ACTION_SAVE, "Cancel", GTK_RESPONSE_CANCEL, "Save",
         GTK_RESPONSE_ACCEPT, NULL);
-    gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dialog), "fc_report.txt");
+    gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(dialog),
+                                      "fc_report.txt");
     if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
         char *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(
             dialog));
@@ -7772,125 +8141,144 @@ static void on_fc_save_report(GtkButton *button, gpointer user_data)
         if (f != NULL) {
             fwrite(text, 1, strlen(text), f);
             fclose(f);
-            if (ui->fc_status_label != NULL) {
-                char msg[512];
-
-                snprintf(msg, sizeof(msg), "Report saved: %s", filename);
-                gtk_label_set_text(GTK_LABEL(ui->fc_status_label), msg);
-            }
-        } else if (ui->fc_status_label != NULL) {
-            char msg[512];
-
-            snprintf(msg, sizeof(msg), "Cannot write %s",
-                     filename != NULL ? filename : "(null)");
-            gtk_label_set_text(GTK_LABEL(ui->fc_status_label), msg);
         }
         g_free(filename);
     }
     gtk_widget_destroy(dialog);
-    (void)ext;
 }
 
-/* --- the page ----------------------------------------------------------- */
+/* ---- the page --------------------------------------------------------- */
 
 static GtkWidget *build_fc_left_panel(Ui *ui)
 {
     GtkWidget *left = gtk_box_new(GTK_ORIENTATION_VERTICAL, PAGE_SPACING);
     GtkWidget *toolbar = gtk_flow_box_new();
+    GtkWidget *explore = gtk_flow_box_new();
     GtkWidget *scroll = gtk_scrolled_window_new(NULL, NULL);
-    GtkWidget *frame = gtk_frame_new("Session properties");
-    GtkWidget *grid = gtk_grid_new();
-    GtkWidget *properties;
+    GtkWidget *details_scroll = gtk_scrolled_window_new(NULL, NULL);
+    GtkWidget *details_frame = gtk_frame_new("Dataset details");
 
     gtk_widget_set_margin_start(left, PAGE_MARGIN);
     gtk_widget_set_margin_end(left, PAGE_MARGIN);
     gtk_widget_set_margin_top(left, PAGE_MARGIN);
     gtk_widget_set_margin_bottom(left, PAGE_MARGIN);
 
-    /* toolbar: load / remove / remove all */
+    /* load / save / remove */
     gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(toolbar), GTK_SELECTION_NONE);
     gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(toolbar), PAGE_SPACING);
     {
-        GtkWidget *load_btn = gtk_button_new_with_label("Load session…");
-        GtkWidget *rm = gtk_button_new_with_label("Remove session");
+        GtkWidget *load_btn = gtk_button_new_with_label("Load dataset…");
+        GtkWidget *save_btn = gtk_button_new_with_label("Save dataset…");
+        GtkWidget *rm = gtk_button_new_with_label("Remove dataset");
         GtkWidget *rm_all = gtk_button_new_with_label("Remove all");
 
         gtk_widget_set_tooltip_text(load_btn,
-                                    "Load one or more measurement files "
-                                    "(one frequency in Hz per line)");
+                                    "Load one or more measurement datasets "
+                                    "(schema/fc_dataset.json)");
+        gtk_widget_set_tooltip_text(save_btn,
+                                    "Write the selected dataset back to JSON");
+        gtk_widget_set_tooltip_text(rm,
+                                    "Remove the dataset containing the "
+                                    "selection");
         g_signal_connect(load_btn, "clicked",
                          G_CALLBACK(on_fc_load_clicked), ui);
+        g_signal_connect(save_btn, "clicked",
+                         G_CALLBACK(on_fc_save_clicked), ui);
         g_signal_connect(rm, "clicked", G_CALLBACK(on_fc_remove_clicked), ui);
         g_signal_connect(rm_all, "clicked",
                          G_CALLBACK(on_fc_remove_all_clicked), ui);
+        ui->fc_save_btn = save_btn;
         ui->fc_remove_btn = rm;
         ui->fc_remove_all_btn = rm_all;
+        gtk_widget_set_sensitive(save_btn, FALSE);
+        gtk_widget_set_sensitive(rm, FALSE);
         gtk_flow_box_insert(GTK_FLOW_BOX(toolbar), load_btn, -1);
+        gtk_flow_box_insert(GTK_FLOW_BOX(toolbar), save_btn, -1);
         gtk_flow_box_insert(GTK_FLOW_BOX(toolbar), rm, -1);
         gtk_flow_box_insert(GTK_FLOW_BOX(toolbar), rm_all, -1);
     }
     gtk_box_pack_start(GTK_BOX(left), toolbar, FALSE, FALSE, 0);
 
-    /* session list */
-    ui->fc_store = gtk_list_store_new(FC_COL_COUNT, G_TYPE_STRING,
+    /* explore: filter + expand/collapse */
+    gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(explore),
+                                    GTK_SELECTION_NONE);
+    gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(explore), PAGE_SPACING);
+    {
+        GtkWidget *expand = gtk_button_new_with_label("Expand all");
+        GtkWidget *collapse = gtk_button_new_with_label("Collapse all");
+
+        ui->fc_search_entry = gtk_entry_new();
+        gtk_entry_set_placeholder_text(GTK_ENTRY(ui->fc_search_entry),
+                                       "Filter datasets, rounds, subjects…");
+        gtk_widget_set_hexpand(ui->fc_search_entry, TRUE);
+        g_signal_connect(ui->fc_search_entry, "changed",
+                         G_CALLBACK(on_fc_search_changed), ui);
+        g_signal_connect(expand, "clicked",
+                         G_CALLBACK(on_fc_expand_clicked), ui);
+        g_signal_connect(collapse, "clicked",
+                         G_CALLBACK(on_fc_collapse_clicked), ui);
+        ui->fc_expand_btn = expand;
+        ui->fc_collapse_btn = collapse;
+        gtk_flow_box_insert(GTK_FLOW_BOX(explore), ui->fc_search_entry, -1);
+        gtk_flow_box_insert(GTK_FLOW_BOX(explore), expand, -1);
+        gtk_flow_box_insert(GTK_FLOW_BOX(explore), collapse, -1);
+    }
+    gtk_box_pack_start(GTK_BOX(left), explore, FALSE, FALSE, 0);
+
+    /* the dataset / session / round / subject tree */
+    ui->fc_model = gtk_tree_store_new(FC_T_COUNT, G_TYPE_STRING,
                                       G_TYPE_STRING, G_TYPE_STRING,
-                                      G_TYPE_STRING, G_TYPE_STRING);
-    ui->fc_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(ui->fc_store));
+                                      G_TYPE_INT, G_TYPE_INT, G_TYPE_INT,
+                                      G_TYPE_INT, G_TYPE_INT, G_TYPE_INT);
+    ui->fc_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(ui->fc_model));
     gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(ui->fc_view), TRUE);
     {
-        static const char *titles[FC_COL_COUNT] = {
-            "Session", "Date / time", "Location", "Points", "Notes"
-        };
+        static const char *titles[4] = { "Item", "ID / name", "Details",
+                                         "Meas." };
 
-        for (int i = 0; i < FC_COL_COUNT; i++) {
+        for (int i = 0; i < 4; i++) {
             GtkCellRenderer *r = gtk_cell_renderer_text_new();
-            GtkTreeViewColumn *c;
-            char title[32];
+            GtkTreeViewColumn *c = gtk_tree_view_column_new_with_attributes(
+                titles[i], r, "text", i, NULL);
 
-            snprintf(title, sizeof(title), "%s", titles[i]);
-            c = gtk_tree_view_column_new_with_attributes(title, r, "text", i,
-                                                         NULL);
+            if (i == 2) {
+                g_object_set(r, "ellipsize", PANGO_ELLIPSIZE_END, NULL);
+                gtk_tree_view_column_set_expand(c, TRUE);
+            }
             gtk_tree_view_column_set_resizable(c, TRUE);
             gtk_tree_view_append_column(GTK_TREE_VIEW(ui->fc_view), c);
         }
     }
-    gtk_widget_set_size_request(ui->fc_view, -1, 200);
+    gtk_widget_set_size_request(ui->fc_view, -1, 220);
     gtk_container_add(GTK_CONTAINER(scroll), ui->fc_view);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
                                    GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
     gtk_box_pack_start(GTK_BOX(left), scroll, TRUE, TRUE, 0);
     g_signal_connect(gtk_tree_view_get_selection(GTK_TREE_VIEW(ui->fc_view)),
-                     "changed", G_CALLBACK(on_fc_selection_changed), ui);
+                     "changed", G_CALLBACK(on_fc_tree_selection_changed), ui);
 
-    /* property editor for the selected session */
-    gtk_grid_set_row_spacing(GTK_GRID(grid), 4);
-    gtk_grid_set_column_spacing(GTK_GRID(grid), 8);
-    gtk_widget_set_margin_start(grid, PAGE_MARGIN);
-    gtk_widget_set_margin_end(grid, PAGE_MARGIN);
-    gtk_widget_set_margin_top(grid, PAGE_MARGIN);
-    gtk_widget_set_margin_bottom(grid, PAGE_MARGIN);
-    {
-        static const char *labels[] = {"Label:", "Latitude:", "Longitude:",
-                                       "Date / time:", "Notes:"};
-        GtkWidget **entries[] = {&ui->fc_label_entry, &ui->fc_lat_entry,
-                                 &ui->fc_lon_entry, &ui->fc_datetime_entry,
-                                 &ui->fc_notes_entry};
+    /* schema details of the selected node */
+    ui->fc_details_view = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(ui->fc_details_view), FALSE);
+    gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(ui->fc_details_view),
+                                     FALSE);
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(ui->fc_details_view),
+                                GTK_WRAP_WORD_CHAR);
+    gtk_text_view_set_monospace(GTK_TEXT_VIEW(ui->fc_details_view), TRUE);
+    gtk_container_add(GTK_CONTAINER(details_scroll), ui->fc_details_view);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(details_scroll),
+                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_widget_set_size_request(details_scroll, -1, 180);
+    gtk_container_add(GTK_CONTAINER(details_frame), details_scroll);
+    gtk_box_pack_start(GTK_BOX(left), details_frame, TRUE, TRUE, 0);
 
-        for (int i = 0; i < 5; i++) {
-            GtkWidget *l = gtk_label_new(labels[i]);
-
-            gtk_widget_set_halign(l, GTK_ALIGN_START);
-            gtk_grid_attach(GTK_GRID(grid), l, 0, i, 1, 1);
-            *entries[i] = gtk_entry_new();
-            gtk_widget_set_hexpand(*entries[i], TRUE);
-            gtk_grid_attach(GTK_GRID(grid), *entries[i], 1, i, 1, 1);
-            g_signal_connect(*entries[i], "changed",
-                             G_CALLBACK(on_fc_meta_changed), ui);
-        }
-    }
-    gtk_container_add(GTK_CONTAINER(frame), grid);
-    properties = frame;
-    gtk_box_pack_start(GTK_BOX(left), properties, FALSE, FALSE, 0);
+    /* totals */
+    ui->fc_status_label = gtk_label_new("No datasets loaded.");
+    gtk_label_set_xalign(GTK_LABEL(ui->fc_status_label), 0.0);
+    gtk_label_set_line_wrap(GTK_LABEL(ui->fc_status_label), TRUE);
+    gtk_label_set_ellipsize(GTK_LABEL(ui->fc_status_label),
+                            PANGO_ELLIPSIZE_END);
+    gtk_box_pack_start(GTK_BOX(left), ui->fc_status_label, FALSE, FALSE, 0);
     return left;
 }
 
@@ -7909,17 +8297,17 @@ static GtkWidget *build_fc_analysis_page(Ui *ui)
     ui->fc_analyze_btn = gtk_button_new_with_label("Analyze");
     gtk_widget_set_tooltip_text(ui->fc_analyze_btn,
                                 "Run the frequency-counter analysis DAG "
-                                "over the loaded sessions");
+                                "over the loaded datasets");
     g_signal_connect(ui->fc_analyze_btn, "clicked",
                      G_CALLBACK(on_fc_analyze_clicked), ui);
     gtk_flow_box_insert(GTK_FLOW_BOX(toolbar), ui->fc_analyze_btn, -1);
     ui->fc_report_format_combo = gtk_combo_box_text_new();
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(ui->fc_report_format_combo),
-                                   "Text");
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(ui->fc_report_format_combo),
-                                   "Markdown");
-    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(ui->fc_report_format_combo),
-                                   "HTML");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(
+                                       ui->fc_report_format_combo), "Text");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(
+                                       ui->fc_report_format_combo), "Markdown");
+    gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(
+                                       ui->fc_report_format_combo), "HTML");
     gtk_combo_box_set_active(GTK_COMBO_BOX(ui->fc_report_format_combo), 0);
     g_signal_connect(ui->fc_report_format_combo, "changed",
                      G_CALLBACK(on_fc_report_format_changed), ui);
@@ -7930,13 +8318,6 @@ static GtkWidget *build_fc_analysis_page(Ui *ui)
                      G_CALLBACK(on_fc_save_report), ui);
     gtk_flow_box_insert(GTK_FLOW_BOX(toolbar), ui->fc_report_save_btn, -1);
     gtk_box_pack_start(GTK_BOX(page), toolbar, FALSE, FALSE, 0);
-
-    ui->fc_status_label = gtk_label_new("No sessions loaded.");
-    gtk_label_set_xalign(GTK_LABEL(ui->fc_status_label), 0.0);
-    gtk_label_set_line_wrap(GTK_LABEL(ui->fc_status_label), TRUE);
-    gtk_label_set_ellipsize(GTK_LABEL(ui->fc_status_label),
-                            PANGO_ELLIPSIZE_END);
-    gtk_box_pack_start(GTK_BOX(page), ui->fc_status_label, FALSE, FALSE, 0);
 
     ui->fc_progress = gtk_progress_bar_new();
     gtk_progress_bar_set_pulse_step(GTK_PROGRESS_BAR(ui->fc_progress), 0.1);
@@ -7970,10 +8351,10 @@ static GtkWidget *build_freq_counter_page(Ui *ui)
                              gtk_label_new("Settings"));
     gtk_paned_pack1(GTK_PANED(paned), left, TRUE, FALSE);
     gtk_paned_pack2(GTK_PANED(paned), right, FALSE, FALSE);
-    gtk_paned_set_position(GTK_PANED(paned), 520);
-    fsl_init(&ui->fc_series);
-    fc_refresh_store(ui, -1);
-    fc_show_session(ui, -1);
+    gtk_paned_set_position(GTK_PANED(paned), 620);
+    fcd_list_init(&ui->fc_datasets);
+    fc_rebuild(ui, false);
+    fc_show_details(ui);
     return paned;
 }
 
@@ -8496,7 +8877,7 @@ void ui_cleanup(Ui *ui)
         ((FcJob *)ui->fc_job)->cancelled = 1;
         ui->fc_job = NULL;
     }
-    fsl_clear(&ui->fc_series);
+    fcd_list_clear(&ui->fc_datasets);
     free(ui->fc_report_text);
     free(ui->fc_report_markdown);
     free(ui->fc_report_html);

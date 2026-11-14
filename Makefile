@@ -16,10 +16,12 @@ GTK_CFLAGS := $(shell pkg-config --cflags gtk+-3.0)
 GTK_LIBS   := $(shell pkg-config --libs gtk+-3.0)
 FFTW_CFLAGS := $(shell pkg-config --cflags fftw3f)
 FFTW_LIBS   := $(shell pkg-config --libs fftw3f)
+JSONC_CFLAGS := $(shell pkg-config --cflags json-c)
+JSONC_LIBS   := $(shell pkg-config --libs json-c)
 AUDIO_LIBS := -framework AudioToolbox -framework CoreAudio \
               -framework CoreFoundation
-LDLIBS   := $(GTK_LIBS) $(FFTW_LIBS) $(AUDIO_LIBS) -lpthread -lm
-ALL_CFLAGS := $(CFLAGS) $(WARNINGS) $(CPPFLAGS) $(GTK_CFLAGS) $(FFTW_CFLAGS)
+LDLIBS   := $(GTK_LIBS) $(FFTW_LIBS) $(JSONC_LIBS) $(AUDIO_LIBS) -lpthread -lm
+ALL_CFLAGS := $(CFLAGS) $(WARNINGS) $(CPPFLAGS) $(GTK_CFLAGS) $(FFTW_CFLAGS) $(JSONC_CFLAGS)
 
 APP_SRC := \
 	src/main.c \
@@ -33,7 +35,7 @@ APP_SRC := \
 	src/waterfall_cache.c \
 	src/streambuf.c \
 	src/renderbuf.c \
-	src/freqseries.c \
+	src/fcdataset.c \
 	src/dagcore.c \
 	src/dag.c \
 	src/fcdag.c \
@@ -81,7 +83,7 @@ TEST_SRC := \
 	src/waterfall_cache.c \
 	src/streambuf.c \
 	src/renderbuf.c \
-	src/freqseries.c \
+	src/fcdataset.c \
 	src/dagcore.c \
 	src/fcdag.c \
 	src/fcreport.c \
@@ -134,7 +136,7 @@ build/te15: $(APP_SRC) $(ABOUT_IMAGE) src/*.h | build
 	$(CC) $(ALL_CFLAGS) -o $@ $(APP_SRC) $(ABOUT_IMAGE) $(LDLIBS)
 
 build/test_runner: $(TEST_SRC) src/*.h | build
-	$(CC) $(ALL_CFLAGS) -o $@ $(TEST_SRC) $(FFTW_LIBS) $(AUDIO_LIBS) -lpthread -lm
+	$(CC) $(ALL_CFLAGS) -o $@ $(TEST_SRC) $(FFTW_LIBS) $(JSONC_LIBS) $(AUDIO_LIBS) -lpthread -lm
 
 build:
 	mkdir -p build

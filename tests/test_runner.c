@@ -51,7 +51,7 @@
 #include "dagcore.h"
 #include "fcdag.h"
 #include "fcreport.h"
-#include "freqseries.h"
+#include "fcdataset.h"
 #include "renderbuf.h"
 
 static int checks_run = 0;
@@ -4404,97 +4404,243 @@ static void test_dagcore(void)
     /* the Spectrum and Frequency Counter registries share this engine */
     CHECK(fc_node_count == 0);
     {
-        FreqSeriesList list;
+        FcDatasetList list;
         FcRun *fc_run;
 
-        fsl_init(&list);
+        fcd_list_init(&list);
         fc_run = fc_dag_run(&list, err, sizeof(err));
         CHECK(fc_run != NULL);
         if (fc_run != NULL) {
             CHECK(fc_run->count == 0);
             fc_dag_free(fc_run);
         }
-        fsl_clear(&list);
+        fcd_list_clear(&list);
     }
 }
 
-static void test_freqseries(void)
+/* A valid dataset fixture following schema/fc_dataset.json. */
+static const char *valid_dataset_json(void)
 {
-    FreqSeriesList list;
-    char err[256] = "";
-    char path[] = "/tmp/te15_fc_sessions.txt";
+    return "{\n"
+    "  \"dataset_id\": \"ds-2026-11-14\",\n"
+    "  \"source_file\": \"counter-session-1.csv\",\n"
+    "  \"title\": \"Utrecht carrier survey\",\n"
+    "  \"notes\": [\"first note\", \"second note\"],\n"
+    "  \"sessions\": [\n"
+    "    {\n"
+    "      \"session_id\": 7,\n"
+    "      \"rounds\": [\n"
+    "        {\n"
+    "          \"round_id\": \"r1\",\n"
+    "          \"location\": \"Utrecht\",\n"
+    "          \"date\": \"2026-11-14T16:40:00Z\",\n"
+    "          \"coordinates\": { \"latitude\": 52.0907, \"longitude\": 5.1214 },\n"
+    "          \"closest_towers_enb_ids\": [\"tower-a\", 42],\n"
+    "          \"context\": \"rooftop\",\n"
+    "          \"subjects_listed\": [\"carrier-a\", \"carrier-b\"],\n"
+    "          \"subjects\": [\n"
+    "            { \"name\": \"carrier-a\", \"measurements\": [2529900000.5, 2529900500.5, 2529901000.5] },\n"
+    "            { \"name\": \"carrier-b\", \"measurements\": [] }\n"
+    "          ]\n"
+    "        },\n"
+    "        {\n"
+    "          \"round_id\": 2,\n"
+    "          \"location\": null,\n"
+    "          \"date\": null,\n"
+    "          \"coordinates\": null,\n"
+    "          \"closest_towers_enb_ids\": null,\n"
+    "          \"context\": null,\n"
+    "          \"subjects_listed\": [],\n"
+    "          \"subjects\": [\n"
+    "            { \"name\": \"carrier-c\", \"measurements\": [2510000000.25] }\n"
+    "          ]\n"
+    "        }\n"
+    "      ]\n"
+    "    }\n"
+    "  ],\n"
+    "  \"unassigned_measurements\": [2500000000.75, 2500000001.75]\n"
+    "}\n";
+}
 
-    puts("\n-- Frequency Counter sessions --");
-    fsl_init(&list);
-    write_text_file(path,
-                    "# a comment line\n"
-                    "2530000123.5\n"
-                    "\n"
-                    "  2530000999.25  \n"
-                    "2.5300005e9\n"
-                    "garbage line\n"
-                    "2530002000.0 # trailing comment\n");
-    CHECK(fsl_load_file(&list, path, err, sizeof(err)));
-    printf("  loaded %zu session(s), %zu points, label '%s'\n", list.count,
-           list.count > 0 ? list.items[0].count : 0,
-           list.count > 0 ? list.items[0].label : "-");
+static bool load_temp_dataset(FcDatasetList *list, const char *text,
+                              const char *path, char *err, size_t err_len)
+{
+    write_text_file(path, text);
+    return fcd_load_file(list, path, err, err_len);
+}
+
+static void test_fcdataset(void)
+{
+    FcDatasetList list;
+    char err[512] = "";
+    char path[] = "/tmp/te15_fc_dataset.json";
+
+    puts("\n-- Frequency Counter datasets (schema/fc_dataset.json) --");
+    fcd_list_init(&list);
+    CHECK(load_temp_dataset(&list, valid_dataset_json(), path, err, sizeof(err)));
+    printf("  loaded %zu dataset(s): %s (%zu measurements)\n", list.count,
+           list.count > 0 ? list.items[0].title : "-",
+           fcd_list_count_measurements(&list));
     CHECK(list.count == 1);
     if (list.count == 1) {
-        const FreqSession *s = &list.items[0];
+        const FcDataset *ds = &list.items[0];
 
-        CHECK(s->count == 4);   /* the garbage line is skipped */
-        CHECK(fabs(s->freqs[0] - 2530000123.5) < 1e-3);
-        CHECK(fabs(s->freqs[1] - 2530000999.25) < 1e-3);
-        CHECK(fabs(s->freqs[2] - 2.5300005e9) < 1.0);
-        CHECK(fabs(s->freqs[3] - 2530002000.0) < 1e-3);
-        CHECK(s->label != NULL && strcmp(s->label, "te15_fc_sessions") == 0);
-        CHECK(s->datetime != NULL);
-        CHECK(s->notes != NULL);
-        CHECK(!s->has_location);
-        /* user metadata */
-        fsl_set_label(&list.items[0], "Utrecht test");
-        fsl_set_location(&list.items[0], true, 52.0907, 5.1214);
-        fsl_set_notes(&list.items[0], "steady carrier");
-        fsl_set_datetime(&list.items[0], "2026-11-14 16:40");
-        CHECK(strcmp(list.items[0].label, "Utrecht test") == 0);
-        CHECK(list.items[0].has_location);
-        CHECK(fabs(list.items[0].lat - 52.0907) < 1e-9);
-        CHECK(fabs(list.items[0].lon - 5.1214) < 1e-9);
+        CHECK(strcmp(ds->dataset_id, "ds-2026-11-14") == 0);
+        CHECK(strcmp(ds->source_file, "counter-session-1.csv") == 0);
+        CHECK(strcmp(ds->title, "Utrecht carrier survey") == 0);
+        CHECK(ds->n_notes == 2);
+        CHECK(strcmp(ds->notes[1], "second note") == 0);
+        CHECK(ds->n_sessions == 1);
+        CHECK(fcd_count_rounds(ds) == 2);
+        CHECK(fcd_count_subjects(ds) == 3);
+        CHECK(fcd_count_measurements(ds) == 6);   /* 3 + 0 + 1 + 2 */
+        CHECK(ds->sessions[0].session_id.numeric);
+        CHECK(ds->sessions[0].session_id.number == 7);
+        CHECK(ds->sessions[0].n_rounds == 2);
+        {
+            const FcRound *r0 = &ds->sessions[0].rounds[0];
+
+            CHECK(strcmp(r0->round_id.text, "r1") == 0);
+            CHECK(!r0->round_id.numeric);
+            CHECK(r0->location != NULL && strcmp(r0->location, "Utrecht") == 0);
+            CHECK(r0->date != NULL && strstr(r0->date, "2026-11-14") != NULL);
+            CHECK(r0->has_coordinates);
+            CHECK(fabs(r0->latitude - 52.0907) < 1e-9);
+            CHECK(fabs(r0->longitude - 5.1214) < 1e-9);
+            CHECK(r0->n_towers == 2);
+            CHECK(strcmp(r0->towers[0], "tower-a") == 0);
+            CHECK(strcmp(r0->towers[1], "42") == 0);
+            CHECK(r0->context != NULL && strcmp(r0->context, "rooftop") == 0);
+            CHECK(r0->n_listed == 2);
+            CHECK(r0->n_subjects == 2);
+            CHECK(strcmp(r0->subjects[0].name, "carrier-a") == 0);
+            CHECK(r0->subjects[0].count == 3);
+            CHECK(fabs(r0->subjects[0].measurements[0] - 2529900000.5) < 1e-3);
+            CHECK(r0->subjects[1].count == 0);
+            {
+                const FcRound *r1 = &ds->sessions[0].rounds[1];
+
+                CHECK(r1->round_id.numeric && r1->round_id.number == 2);
+                CHECK(r1->location == NULL);
+                CHECK(!r1->has_coordinates);
+                CHECK(r1->towers_null);
+                CHECK(r1->n_towers == 0);
+            }
+        }
+        CHECK(ds->n_unassigned == 2);
+        CHECK(fabs(ds->unassigned[1] - 2500000001.75) < 1e-3);
     }
-    CHECK(fsl_total_points(&list) == 4);
+    {
+        double lo = 0, hi = 0, mean = 0;
+
+        CHECK(fc_stats(list.items[0].sessions[0].rounds[0].subjects[0]
+                           .measurements,
+                       3, &lo, &hi, &mean));
+        CHECK(fabs(lo - 2529900000.5) < 1e-3);
+        CHECK(fabs(hi - 2529901000.5) < 1e-3);
+        CHECK(fabs(mean - 2529900500.5) < 1e-3);
+    }
 
     /* deep copy + remove */
     {
-        FreqSeriesList copy;
+        FcDatasetList copy;
 
-        CHECK(fsl_clone(&list, &copy));
-        CHECK(copy.count == 1 && copy.items[0].count == 4);
-        CHECK(copy.items[0].freqs != list.items[0].freqs);
-        fsl_clear(&copy);
+        CHECK(fcd_list_clone(&list, &copy));
+        CHECK(copy.count == 1);
+        CHECK(copy.items[0].sessions[0].rounds[0].subjects[0].measurements !=
+              list.items[0].sessions[0].rounds[0].subjects[0].measurements);
+        CHECK(strcmp(copy.items[0].title, list.items[0].title) == 0);
+        fcd_list_clear(&copy);
     }
-    fsl_remove(&list, 0);
-    CHECK(list.count == 0);
-    fsl_remove(&list, 5);   /* out of range: ignored */
-    CHECK(list.count == 0);
-    fsl_clear(&list);
 
-    /* a file with no measurements is rejected */
-    write_text_file(path, "# only comments\n\nfoo\n");
-    CHECK(!fsl_load_file(&list, path, err, sizeof(err)));
-    CHECK(err[0] != '\0');
-    fsl_clear(&list);
+    /* save -> reload: the model round-trips through JSON */
+    {
+        char saved[] = "/tmp/te15_fc_dataset_saved.json";
+        FcDatasetList reloaded;
+        char cerr[512] = "";
+
+        CHECK(fcd_save_file(&list.items[0], saved, cerr, sizeof(cerr)));
+        fcd_list_init(&reloaded);
+        CHECK(fcd_load_file(&reloaded, saved, cerr, sizeof(cerr)));
+        CHECK(reloaded.count == 1);
+        if (reloaded.count == 1) {
+            CHECK(strcmp(reloaded.items[0].dataset_id, "ds-2026-11-14") == 0);
+            CHECK(reloaded.items[0].n_sessions == 1);
+            CHECK(fcd_count_measurements(&reloaded.items[0]) == 6);
+            CHECK(reloaded.items[0].sessions[0].rounds[0].subjects[0].count == 3);
+            CHECK(fcd_count_rounds(&reloaded.items[0]) == 2);
+        }
+        fcd_list_clear(&reloaded);
+        remove(saved);
+    }
+
+    /* schema violations are rejected with a path in the message */
+    {
+        static const char *const bad[] = {
+            /* missing required title */
+            "{\"dataset_id\":\"d\",\"source_file\":\"s\",\"sessions\":[]}",
+            /* additionalProperties false at the top level */
+            "{\"dataset_id\":\"d\",\"source_file\":\"s\",\"title\":\"t\","
+            "\"sessions\":[],\"extra\":1}",
+            /* coordinates must have both members */
+            "{\"dataset_id\":\"d\",\"source_file\":\"s\",\"title\":\"t\","
+            "\"sessions\":[{\"session_id\":1,\"rounds\":[{\"round_id\":1,"
+            "\"subjects\":[],\"coordinates\":{\"latitude\":1}}]}]}",
+            /* a measurement must be a number */
+            "{\"dataset_id\":\"d\",\"source_file\":\"s\",\"title\":\"t\","
+            "\"sessions\":[{\"session_id\":1,\"rounds\":[{\"round_id\":1,"
+            "\"subjects\":[{\"name\":\"a\",\"measurements\":[\"x\"]}]}]}]}",
+            /* subjects must be an array */
+            "{\"dataset_id\":\"d\",\"source_file\":\"s\",\"title\":\"t\","
+            "\"sessions\":[{\"session_id\":1,\"rounds\":[{\"round_id\":1,"
+            "\"subjects\":{}}]}]}",
+            /* not JSON at all */
+            "{ this is not json"
+        };
+
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            FcDatasetList b;
+
+            fcd_list_init(&b);
+            err[0] = '\0';
+            CHECK(!load_temp_dataset(&b, bad[i], path, err, sizeof(err)));
+            CHECK(err[0] != '\0');
+            if (i == 0) {
+                printf("  missing title -> '%s'\n", err);
+                CHECK(strstr(err, "title") != NULL);
+            }
+            if (i == 1) {
+                printf("  extra property -> '%s'\n", err);
+                CHECK(strstr(err, "extra") != NULL);
+            }
+            if (i == 2) {
+                printf("  missing longitude -> '%s'\n", err);
+                CHECK(strstr(err, "longitude") != NULL);
+            }
+            if (i == 3) {
+                printf("  bad measurement -> '%s'\n", err);
+                CHECK(strstr(err, "measurements") != NULL);
+            }
+            fcd_list_clear(&b);
+        }
+    }
+    fcd_list_remove(&list, 0);
+    CHECK(list.count == 0);
+    fcd_list_remove(&list, 9);   /* out of range: ignored */
+    CHECK(list.count == 0);
+    fcd_list_clear(&list);
     remove(path);
 }
 
 static void test_fcdag(void)
 {
-    FreqSeriesList list;
+    FcDatasetList list;
     FcRun *run;
     char err[256] = "";
     char *text = NULL, *md = NULL, *html = NULL;
 
     puts("\n-- Frequency Counter analysis DAG --");
-    fsl_init(&list);
+    fcd_list_init(&list);
     CHECK(fc_node_count == 0);   /* no analyses are implemented yet */
     run = fc_dag_run(&list, err, sizeof(err));
     CHECK(run != NULL);
@@ -4509,6 +4655,7 @@ static void test_fcdag(void)
                    strstr(text, "DAG") != NULL);
             CHECK(strstr(text, "FREQUENCY COUNTER ANALYSIS REPORT") != NULL);
             CHECK(strstr(text, "Registry: 0 analyses defined") != NULL);
+            CHECK(strstr(text, "schema: fc_dataset.json") != NULL);
             CHECK(strstr(text, "no analyses are defined") != NULL ||
                   strstr(text, "not implemented yet") != NULL);
         }
@@ -4523,7 +4670,7 @@ static void test_fcdag(void)
         free(html);
         fc_dag_free(run);
     }
-    fsl_clear(&list);
+    fcd_list_clear(&list);
 }
 
 static void test_lte_hint(void)
@@ -5041,7 +5188,7 @@ int main(void)
     test_streambuf();
     test_renderbuf();
     test_dagcore();
-    test_freqseries();
+    test_fcdataset();
     test_fcdag();
     test_rank_canonical();
     test_synth_matches();

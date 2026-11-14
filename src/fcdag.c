@@ -39,7 +39,7 @@ static const char *fc_skip_reason(void *ctx, const DagCoreNodeSpec *spec)
     return "no algorithm is implemented for this analysis yet";
 }
 
-FcRun *fc_dag_run(const FreqSeriesList *list, char *err, size_t err_len)
+FcRun *fc_dag_run(const FcDatasetList *list, char *err, size_t err_len)
 {
     static const DagCoreExec exec = {
         fc_execute, fc_skip_reason, NULL, NULL

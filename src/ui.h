@@ -19,7 +19,7 @@
 #include "iq_source.h"
 #include "waterfall_cache.h"
 #include "fcdag.h"
-#include "freqseries.h"
+#include "fcdataset.h"
 #include "lte_uplink.h"
 #include "renderbuf.h"
 #include "analysis.h"
@@ -321,16 +321,16 @@ typedef struct Ui {
     GtkWidget *spectrum_page;   /* the page holding the waterfall + dock */
     GtkWidget *freq_counter_page;   /* second main tab                  */
     /* --- Frequency Counter: measurement sessions + analysis --- */
-    FreqSeriesList fc_series;        /* loaded measurement sessions     */
-    GtkWidget  *fc_view;             /* session list (GtkTreeView)      */
-    GtkListStore *fc_store;          /* its model                       */
-    GtkWidget  *fc_label_entry;      /* session properties editor       */
-    GtkWidget  *fc_lat_entry;
-    GtkWidget  *fc_lon_entry;
-    GtkWidget  *fc_datetime_entry;
-    GtkWidget  *fc_notes_entry;
+    FcDatasetList fc_datasets;       /* loaded measurement datasets     */
+    GtkWidget  *fc_view;             /* dataset/session tree (GtkTreeView) */
+    GtkTreeStore *fc_model;          /* its model                       */
+    GtkWidget  *fc_details_view;     /* schema details of the selection */
+    GtkWidget  *fc_search_entry;     /* filter datasets/sessions/...    */
+    GtkWidget  *fc_save_btn;
     GtkWidget  *fc_remove_btn;
     GtkWidget  *fc_remove_all_btn;
+    GtkWidget  *fc_expand_btn;
+    GtkWidget  *fc_collapse_btn;
     GtkWidget  *fc_analyze_btn;      /* Analysis pane controls          */
     GtkWidget  *fc_progress;
     GtkWidget  *fc_status_label;

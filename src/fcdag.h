@@ -14,7 +14,7 @@
 #include <stddef.h>
 
 #include "dagcore.h"
-#include "freqseries.h"
+#include "fcdataset.h"
 
 typedef DagCoreRun FcRun;
 
@@ -22,10 +22,10 @@ typedef DagCoreRun FcRun;
 extern const DagCoreNodeSpec fc_node_specs[];
 extern const size_t          fc_node_count;
 
-/* Run the registry over a snapshot of the loaded sessions. Callable from a
+/* Run the registry over a snapshot of the loaded datasets. Callable from a
  * worker thread (it only reads `list`). Returns NULL only on allocation
  * failure (err filled). */
-FcRun *fc_dag_run(const FreqSeriesList *list, char *err, size_t err_len);
+FcRun *fc_dag_run(const FcDatasetList *list, char *err, size_t err_len);
 void   fc_dag_free(FcRun *run);
 
 #endif /* TE15_FCDAG_H */
