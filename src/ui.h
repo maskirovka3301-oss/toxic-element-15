@@ -65,6 +65,7 @@ typedef struct Ui {
                               * Hz above (center_freq - sr/2)        */
     double db_min, db_max;
     bool   auto_scale;
+    bool   suppress_auto_commit; /* slider drag is switching Auto off */
 
     /* --- selection & analysis --- */
     Region selection;      /* normalised selection rect  */

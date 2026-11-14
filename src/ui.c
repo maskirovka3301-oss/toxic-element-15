@@ -94,7 +94,7 @@
 
 /* dB sliders */
 #define DB_SCALE_MIN  -150.0
-#define DB_SCALE_MAX     0.0
+#define DB_SCALE_MAX    40.0
 #define DB_SCALE_STEP    1.0
 #define DB_SCALE_WIDTH 120
 
@@ -3752,14 +3752,15 @@ static void apply_db_range(Ui *ui)
     lo = MIN(ui->db_min, ui->db_max);
     hi = MAX(ui->db_min, ui->db_max);
     if (hi - lo < DB_RANGE_MIN_SPAN) hi = lo + DB_RANGE_MIN_SPAN;
-    if (fabs(lo - ui->wf_range_lo) < 1e-9 &&
-        fabs(hi - ui->wf_range_hi) < 1e-9) {
-        return;
-    }
     ui->wf_range_lo = lo;
     ui->wf_range_hi = hi;
-    ui->wf_valid = false;   /* full repaint with the committed range */
+    /* the slider was let go: re-render the whole waterfall surface from the
+     * render buffer with the selected dynamic range applied (the render
+     * buffer itself is never transformed; each raw dB value is normalised
+     * through the range and looked up in the base colour scheme) */
+    ui->wf_valid = false;
     gtk_widget_queue_draw(ui->drawing);
+    gtk_widget_queue_draw(ui->peak_pane);
 }
 
 static gboolean on_db_range_released(GtkWidget *widget, GdkEvent *event,
@@ -3769,6 +3770,23 @@ static gboolean on_db_range_released(GtkWidget *widget, GdkEvent *event,
     (void)event;
     apply_db_range((Ui *)user_data);
     return FALSE;
+}
+
+/* A slider movement switches Auto off, but the dynamic range is only
+ * committed (and the waterfall repainted) when the slider is released:
+ * suppress_auto_commit keeps on_auto_toggled from applying the window now.
+ * The peak view's out-of-range shading follows the sliders live, hence the
+ * peak-pane redraw. */
+static void db_detach_auto(Ui *ui)
+{
+    if (ui->auto_scale) {
+        ui->suppress_auto_commit = true;
+        ui->auto_scale = false;
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->auto_check),
+                                     FALSE);
+        ui->suppress_auto_commit = false;
+    }
+    gtk_widget_queue_draw(ui->peak_pane);
 }
 
 /* Move the other dB slider so the dynamic-range span is preserved (only
@@ -3812,13 +3830,7 @@ static void on_db_min_changed(GtkRange *range, gpointer user_data)
     }
     if (ui->db_min < DB_SCALE_MIN) ui->db_min = DB_SCALE_MIN;
     if (ui->db_min > DB_SCALE_MAX) ui->db_min = DB_SCALE_MAX;
-    ui->auto_scale = false;
-    /* the peak view's out-of-range shading tracks the sliders live; the
-     * waterfall colour scheme still applies only on release */
-    gtk_widget_queue_draw(ui->peak_pane);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->auto_check), FALSE);
-    /* not committed yet: the waterfall keeps the old colour scheme until
-     * the slider is released (db_range_committed) */
+    db_detach_auto(ui);
 }
 
 static void on_db_max_changed(GtkRange *range, gpointer user_data)
@@ -3845,9 +3857,7 @@ static void on_db_max_changed(GtkRange *range, gpointer user_data)
     }
     if (ui->db_max < DB_SCALE_MIN) ui->db_max = DB_SCALE_MIN;
     if (ui->db_max > DB_SCALE_MAX) ui->db_max = DB_SCALE_MAX;
-    ui->auto_scale = false;
-    gtk_widget_queue_draw(ui->peak_pane);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->auto_check), FALSE);
+    db_detach_auto(ui);
 }
 
 static void on_db_lock_toggled(GtkToggleButton *toggle, gpointer user_data)
@@ -3880,16 +3890,20 @@ static void on_auto_toggled(GtkToggleButton *toggle, gpointer user_data)
     Ui *ui = (Ui *)user_data;
 
     ui->auto_scale = gtk_toggle_button_get_active(toggle);
-    gtk_widget_set_sensitive(ui->db_min_scale, !ui->auto_scale);
-    gtk_widget_set_sensitive(ui->db_max_scale, !ui->auto_scale);
-    if (!ui->auto_scale) {
-        /* leaving auto: the sliders' current window becomes the committed
-         * one (built into the colour-scheme copy) */
+    if (ui->auto_scale) {
+        /* auto range: recomputed from the data on the next full repaint */
+        ui->wf_valid = false;
+        gtk_widget_queue_draw(ui->drawing);
+    }
+    if (!ui->auto_scale && !ui->suppress_auto_commit) {
+        /* leaving auto explicitly: the sliders' current window becomes the
+         * committed dynamic range */
         ui->wf_range_lo = MIN(ui->db_min, ui->db_max);
         ui->wf_range_hi = MAX(ui->db_min, ui->db_max);
+        ui->wf_valid = false;
+        gtk_widget_queue_draw(ui->drawing);
     }
-    ui->wf_valid = false;
-    gtk_widget_queue_draw(ui->drawing);
+    gtk_widget_queue_draw(ui->peak_pane);
 }
 
 /* --- menu handlers ------------------------------------------------------- */
@@ -9996,8 +10010,7 @@ void ui_build_window(Ui *ui)
                        FALSE, 0);
 
     /* dB sliders start disabled because auto-scale is on */
-    gtk_widget_set_sensitive(ui->db_min_scale, !ui->auto_scale);
-    gtk_widget_set_sensitive(ui->db_max_scale, !ui->auto_scale);
+
 
     /* --- bottom status bar: visible range left, filename/status right --- */
     GtkWidget *status_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, CONTROL_SPACING);

@@ -272,10 +272,12 @@ viridis colour scheme — used exactly as defined, no copy is modified —
 onto the selected dB window: for every raw dB value read from the render
 buffer the renderer computes (db - min)/(max - min), clamps it to [0,1]
 and looks up the base colour scheme. The render buffer itself is never
-transformed. While a slider is dragged the waterfall keeps the previously
-committed window (a full repaint happens only on release, or when Auto is
-toggled); the peak view's out-of-range shading, in contrast, follows the
-sliders live.
+transformed. The sliders are always usable: touching one switches Auto off
+without committing anything, and when the slider is released the committed
+window is applied and the whole waterfall surface is re-rendered from the
+render buffer with that range. The allowed slider range is -150..+40 dB so
+a window can include the positive-dB peaks of these recordings. The peak
+view's out-of-range shading, in contrast, follows the sliders live.
 
 The waterfall marks the current playback position with a red horizontal
 line (plus a small right-edge marker): the playhead is the stream's leading
