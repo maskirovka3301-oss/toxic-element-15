@@ -4309,6 +4309,12 @@ static const char *probe_skip(void *ctx, const DagCoreNodeSpec *spec)
     return NULL;
 }
 
+static bool sel_probe_enabled(void *ctx, const DagCoreNodeSpec *spec)
+{
+    (void)ctx;
+    return spec != NULL && strcmp(spec->id, "second") == 0;
+}
+
 static bool probe_cancelled(void *ctx)
 {
     DagCoreProbe *p = (DagCoreProbe *)ctx;
@@ -4403,6 +4409,35 @@ static void test_dagcore(void)
         dagcore_destroy(run, NULL);
     }
 
+    /* selection hook: disabled nodes are skipped with a reason and their
+     * dependants are skipped by the prerequisite rule */
+    {
+        static const DagCoreNodeSpec sel_specs[] = {
+            { "first", "First", NULL },
+            { "second", "Second", "first" }
+        };
+        DagCoreExec exec2;
+        DagCoreProbe p2;
+        DagCoreRun *r2;
+        bool enabled[2] = { false, true };
+
+        memset(&p2, 0, sizeof(p2));
+        memset(&exec2, 0, sizeof(exec2));
+        exec2.execute = probe_execute;
+        exec2.cancelled = probe_cancelled;
+        exec2.enabled = sel_probe_enabled;
+        r2 = dagcore_execute(sel_specs, 2, &exec2, &p2, err, sizeof(err));
+        CHECK(r2 != NULL);
+        if (r2 != NULL) {
+            CHECK(r2->nodes[0].status == DAGCORE_SKIPPED);
+            CHECK(strstr(r2->nodes[0].note, "disabled") != NULL);
+            CHECK(r2->nodes[1].status == DAGCORE_SKIPPED);
+            CHECK(strstr(r2->nodes[1].note, "did not run") != NULL);
+            dagcore_destroy(r2, NULL);
+        }
+        (void)enabled;
+    }
+
     /* the Spectrum and Frequency Counter registries share this engine */
     CHECK(fc_node_count == 20);
     {
@@ -4410,7 +4445,7 @@ static void test_dagcore(void)
         FcRun *fc_run;
 
         fcd_list_init(&list);
-        fc_run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, err,
+        fc_run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, NULL, err,
                             sizeof(err));
         CHECK(fc_run != NULL);
         if (fc_run != NULL) {
@@ -4614,7 +4649,7 @@ static void test_fclk(void)
             }
         }
         if (ds != NULL && list.count == 1) {
-            run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, err,
+            run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, NULL, err,
                              sizeof(err));
             CHECK(run != NULL);
             if (run != NULL) {
@@ -4701,6 +4736,65 @@ static void test_fclk(void)
         free(ds2);
     }
 
+    /* analysis selection: disabling one node skips it and its dependants */
+    {
+        FcDatasetList list;
+        FcDataset *ds = make_test_dataset(N, avg3);
+        FcRun *run;
+        char err[256] = "";
+        bool enabled[FC_MAX_NODES];
+
+        CHECK(ds != NULL);
+        fcd_list_init(&list);
+        if (ds != NULL) {
+            list.items = malloc(sizeof(*list.items));
+            if (list.items != NULL) {
+                list.items[0] = *ds;
+                list.count = 1;
+                list.cap = 1;
+            }
+        }
+        for (size_t i = 0; i < FC_MAX_NODES; i++) enabled[i] = true;
+        {
+            size_t idx = (size_t)-1;
+
+            for (size_t i = 0; i < fc_node_count; i++) {
+                if (strcmp(fc_node_specs[i].id, "pdm") == 0) idx = i;
+            }
+            CHECK(idx != (size_t)-1);
+            if (idx != (size_t)-1) enabled[idx] = false;
+        }
+        if (list.count == 1) {
+            run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, enabled, err,
+                             sizeof(err));
+            CHECK(run != NULL);
+            if (run != NULL) {
+                size_t pdm = dagcore_find(run, "pdm");
+                size_t periodogram = dagcore_find(run, "periodogram");
+                char *text = NULL, *md = NULL, *html = NULL;
+
+                CHECK(pdm != (size_t)-1 &&
+                      run->nodes[pdm].status == DAGCORE_SKIPPED);
+                CHECK(strstr(run->nodes[pdm].note, "disabled") != NULL);
+                CHECK(periodogram != (size_t)-1 &&
+                      run->nodes[periodogram].status == DAGCORE_SKIPPED);
+                CHECK(strstr(run->nodes[periodogram].note, "did not run") !=
+                      NULL);
+                fc_report(&list, run, FCL_SCOPE_PER_DATASET, &text, &md,
+                          &html);
+                CHECK(text != NULL &&
+                      strstr(text, "Analyses disabled") != NULL);
+                CHECK(text != NULL && strstr(text, "pdm") != NULL);
+                free(text);
+                free(md);
+                free(html);
+                fc_dag_free(run);
+            }
+        }
+        fcd_list_clear(&list);
+        if (ds != NULL) free(ds);
+    }
+
     /* evidence screen + synthesis on the K=3 averaged data */
     {
         FcDatasetList list;
@@ -4719,7 +4813,8 @@ static void test_fclk(void)
             }
         }
         if (ds != NULL && list.count == 1) {
-            run = fc_dag_run(&list, FCL_SCOPE_MERGED, err, sizeof(err));
+            run = fc_dag_run(&list, FCL_SCOPE_MERGED, NULL, err,
+                             sizeof(err));
             CHECK(run != NULL);
             if (run != NULL) {
                 size_t ev = dagcore_find(run, "evidence-filter");
@@ -5137,7 +5232,7 @@ static void test_fclattice(void)
         if (ds != NULL) {
             size_t done = 0;
 
-            run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, err,
+            run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, NULL, err,
                              sizeof(err));
             CHECK(run != NULL);
             if (run != NULL) {
@@ -5213,7 +5308,7 @@ static void test_fcdag(void)
     puts("\n-- Frequency Counter analysis DAG --");
     fcd_list_init(&list);
     CHECK(fc_node_count == 20);   /* the subcarrier-lattice test chain */
-    run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, err,
+    run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, NULL, err,
                              sizeof(err));
     CHECK(run != NULL);
     if (run != NULL) {

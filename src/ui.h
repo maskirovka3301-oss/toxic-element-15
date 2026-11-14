@@ -344,6 +344,9 @@ typedef struct Ui {
     int         fc_scope;            /* FclScope: per dataset or merged  */
     GtkWidget  *fc_scope_radio_per;   /* Settings: analysis scope         */
     GtkWidget  *fc_scope_radio_merged;
+    bool        fc_node_enabled[32];  /* Settings: analyses to run        */
+    int         fc_node_check_count;  /* number of checkboxes             */
+    GtkWidget  *fc_node_checks[32];   /* the checkbox widgets             */
     void       *fc_job;              /* running FcJob (async analysis)  */
     GtkWidget *drawing;
     /* stationary-hover hint ("Shift+Click to select"): drawn inside the

@@ -66,6 +66,10 @@ typedef struct {
     void (*on_node)(void *ctx, size_t index, size_t count, const char *title);
     /* Cooperative cancellation. */
     bool (*cancelled)(void *ctx);
+    /* Optional selection hook: return false to skip a node as deliberately
+     * disabled (the run records it as skipped with a reason). Nodes that
+     * depend on it are then skipped by the usual prerequisite rule. */
+    bool (*enabled)(void *ctx, const DagCoreNodeSpec *spec);
 } DagCoreExec;
 
 /* --- run state (both modes) ------------------------------------------ */

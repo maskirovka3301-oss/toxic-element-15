@@ -60,6 +60,7 @@ typedef struct {
     bool        have_mixture;     /* mixture fits produced                 */
     bool        have_model;       /* a K was selected                      */
     FclScope    scope;
+    const bool *enabled;    /* user selection (NULL = all enabled) */
     /* evidence accumulated by the individual analyses */
     struct {
         char   family[24];
@@ -1579,8 +1580,20 @@ static const char *fc_skip_reason(void *ctx, const DagCoreNodeSpec *spec)
     return NULL;
 }
 
-FcRun *fc_dag_run(const FcDatasetList *list, FclScope scope, char *err,
-                  size_t err_len)
+/* Selection hook: map the registry spec back to its index. */
+static bool fc_enabled(void *ctx, const DagCoreNodeSpec *spec)
+{
+    FcCtx *c = (FcCtx *)ctx;
+    size_t idx;
+
+    if (c->enabled == NULL || spec == NULL) return true;
+    idx = (size_t)(spec - fc_node_specs);
+    if (idx >= fc_node_count) return true;
+    return c->enabled[idx];
+}
+
+FcRun *fc_dag_run(const FcDatasetList *list, FclScope scope,
+                  const bool *enabled, char *err, size_t err_len)
 {
     FcCtx ctx;
     DagCoreExec exec;
@@ -1589,6 +1602,7 @@ FcRun *fc_dag_run(const FcDatasetList *list, FclScope scope, char *err,
     memset(&ctx, 0, sizeof(ctx));
     ctx.list = list;
     ctx.scope = scope;
+    ctx.enabled = enabled;
     ctx.blocks = fcl_blocks_build(list, scope, &ctx.n_blocks);
     fcl_rng_seed(&ctx.rng, FC_SEED);
     if (ctx.n_blocks > 0) {
@@ -1614,6 +1628,7 @@ FcRun *fc_dag_run(const FcDatasetList *list, FclScope scope, char *err,
     exec.execute = fc_execute;
     exec.skip_reason = fc_skip_reason;
     exec.on_node = fc_on_node;
+    exec.enabled = fc_enabled;
     run = dagcore_execute(fc_node_specs, fc_node_count, &exec, &ctx, err,
                           err_len);
     fcl_blocks_free(ctx.blocks);

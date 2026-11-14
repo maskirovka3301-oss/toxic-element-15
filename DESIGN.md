@@ -221,7 +221,12 @@ induced-lattice clustering was detected, the CF slope when the K=1
 residual dispersion cannot serve as a single-subcarrier reference, and the
 MDL node always (no signal data).
 
-The Frequency Counter **Settings** tab configures the analysis scope:
+The Frequency Counter **Settings** tab also lists every DAG analysis with a
+checkbox (all checked by default; Check all / Uncheck all shortcuts): the
+selection is applied to the next Analyze run, disabled nodes are recorded
+as skipped with a reason and their dependants are skipped by the DAG's
+prerequisite rule, and the report lists which analyses were disabled. The
+**Settings** tab configures the analysis scope:
 analyse every dataset separately (session rounds and subjects) or merge all
 loaded measurements into one list. The choice is applied to the next
 Analyze run and stated in the report header.

@@ -136,6 +136,11 @@ DagCoreRun *dagcore_execute(const DagCoreNodeSpec *specs, size_t n_specs,
             exec->on_node(ctx, i, run->count,
                           spec != NULL ? spec->title : NULL);
         }
+        if (exec != NULL && exec->enabled != NULL &&
+            !exec->enabled(ctx, spec)) {
+            dagcore_skip(run, i, "disabled by the analysis selection");
+            continue;
+        }
         /* dependency ordering: every prerequisite (comma-separated list)
          * must have completed */
         if (spec != NULL && spec->requires != NULL) {

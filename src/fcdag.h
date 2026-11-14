@@ -17,6 +17,8 @@
 #include "fcdataset.h"
 #include "fclattice.h"
 
+#define FC_MAX_NODES 32
+
 typedef DagCoreRun FcRun;
 
 /* The analysis registry (the subcarrier-lattice test chain). */
@@ -26,9 +28,12 @@ extern const size_t          fc_node_count;
 /* Run the registry over a snapshot of the loaded datasets. Callable from a
  * worker thread (it only reads `list`). Returns NULL only on allocation
  * failure (err filled). */
-/* `scope` selects per-dataset blocks or one merged measurement list. */
-FcRun *fc_dag_run(const FcDatasetList *list, FclScope scope, char *err,
-                  size_t err_len);
+/* `scope` selects per-dataset blocks or one merged measurement list.
+ * `enabled` (optional, NULL = all) is an array of length fc_node_count that
+ * selects which registry nodes run; disabled nodes are recorded as skipped
+ * with a reason and their dependants are skipped by the prerequisite rule. */
+FcRun *fc_dag_run(const FcDatasetList *list, FclScope scope,
+                  const bool *enabled, char *err, size_t err_len);
 void   fc_dag_free(FcRun *run);
 
 #endif /* TE15_FCDAG_H */

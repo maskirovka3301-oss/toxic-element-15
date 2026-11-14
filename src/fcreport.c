@@ -348,6 +348,48 @@ static void render_html_table(Str *out, const FclTable *t)
 }
 
 /* Render the payload table of every executed analysis node. */
+/* Count the nodes that the user disabled in the analysis selection and
+ * render them (text/markdown/html). */
+static void add_disabled_note(Str *out, ListStyle style, const FcRun *run)
+{
+    size_t n_disabled = 0;
+    size_t i;
+
+    if (run == NULL) return;
+    for (i = 0; i < run->count; i++) {
+        if (run->nodes[i].status == DAGCORE_SKIPPED &&
+            strstr(run->nodes[i].note, "disabled by the analysis selection") !=
+                NULL) {
+            n_disabled++;
+        }
+    }
+    if (n_disabled == 0) return;
+    if (style == LIST_HTML) {
+        str_add(out, "<p><em>Analyses disabled in the Settings tab: ");
+    } else if (style == LIST_MD) {
+        str_add(out, "\n*Analyses disabled in the Settings tab: ");
+    } else {
+        str_add(out, "  Analyses disabled in the Settings tab: ");
+    }
+    {
+        bool first = true;
+
+        for (i = 0; i < run->count; i++) {
+            const DagCoreNode *node = &run->nodes[i];
+
+            if (node->status != DAGCORE_SKIPPED ||
+                strstr(node->note, "disabled by the analysis selection") ==
+                    NULL) {
+                continue;
+            }
+            if (!first) str_add(out, ", ");
+            str_add(out, node->spec != NULL ? node->spec->id : "?");
+            first = false;
+        }
+    }
+    str_add(out, style == LIST_HTML ? ".</em></p>\n" : ".\n");
+}
+
 static void render_analyses(Str *out, ListStyle style, const FcRun *run)
 {
     if (run == NULL || run->count == 0) {
@@ -411,6 +453,7 @@ static void render_text(Str *out, const FcDatasetList *list,
             }
         }
     }
+    add_disabled_note(out, LIST_TEXT, run);
     str_add(out, "\nANALYSES\n--------\n");
     render_analyses(out, LIST_TEXT, run);
     str_add(out, "\nRESULTS\n-------\n");
@@ -446,6 +489,7 @@ static void render_markdown(Str *out, const FcDatasetList *list,
     str_add(out, "## Input (schema: fc_dataset.json)\n\n");
     render_datasets(out, LIST_MD, list);
     str_add(out, "\n## DAG\n\n");
+    add_disabled_note(out, LIST_MD, run);
     if (fc_node_count == 0) {
         str_add(out, "The registry is empty: 0 analyses are defined. The "
                      "execution framework and this report are in place; the "
@@ -488,6 +532,7 @@ static void render_html(Str *out, const FcDatasetList *list,
     str_add(out, "</em></p>\n<h2>Input (schema: fc_dataset.json)</h2>\n");
     render_datasets(out, LIST_HTML, list);
     str_add(out, "<h2>DAG</h2>\n");
+    add_disabled_note(out, LIST_HTML, run);
     if (fc_node_count == 0) {
         str_add(out, "<p>The registry is empty: 0 analyses are defined. The "
                      "execution framework and this report are in place; the "

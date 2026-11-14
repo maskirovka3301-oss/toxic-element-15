@@ -6279,6 +6279,8 @@ void ui_init(Ui *ui, IqSource *src, WaterfallCache *cache)
     ui->last_progress = -1;
     ui->stream_buffer_fraction = 1.0 / 8.0;
     fcd_list_init(&ui->fc_datasets);
+    for (size_t i = 0; i < FC_MAX_NODES; i++) ui->fc_node_enabled[i] = true;
+    ui->fc_node_check_count = 0;
     ui->streambuf = sb_create(cache, ui->stream_buffer_fraction);
     if (ui->streambuf != NULL) sb_wait_ready(ui->streambuf, 2000);
     ui->renderbuf = rb_create(cache, ui->streambuf);
@@ -7289,6 +7291,8 @@ typedef enum {
 typedef struct {
     Ui            *ui;
     FclScope       scope;
+    bool           enabled[FC_MAX_NODES];
+    int            n_enabled_nodes;
     FcDatasetList  snapshot;
     volatile int   cancelled;
     char          *text;
@@ -8044,7 +8048,8 @@ static gpointer fc_worker(gpointer data)
 {
     FcJob *job = (FcJob *)data;
     char err[256] = "";
-    FcRun *run = fc_dag_run(&job->snapshot, job->scope, err, sizeof(err));
+    FcRun *run = fc_dag_run(&job->snapshot, job->scope, job->enabled, err,
+                            sizeof(err));
 
     if (run == NULL) {
         snprintf(job->err, sizeof(job->err), "%s",
@@ -8075,6 +8080,16 @@ static void on_fc_analyze_clicked(GtkButton *button, gpointer user_data)
     }
     job->ui = ui;
     job->scope = (FclScope)ui->fc_scope;
+    job->n_enabled_nodes = fc_node_count;
+    {
+        int n = ui->fc_node_check_count;
+
+        if (n > (int)fc_node_count) n = (int)fc_node_count;
+        for (int i = 0; i < n; i++) {
+            job->enabled[i] = ui->fc_node_enabled[i];
+        }
+        job->n_enabled_nodes = n;
+    }
     if (!fcd_list_clone(&ui->fc_datasets, &job->snapshot)) {
         fcd_list_clear(&job->snapshot);
         free(job);
@@ -8304,6 +8319,41 @@ static void on_fc_scope_toggled(GtkToggleButton *button, gpointer user_data)
     }
 }
 
+static void on_fc_node_check_toggled(GtkToggleButton *button,
+                                     gpointer user_data)
+{
+    Ui *ui = (Ui *)user_data;
+    int idx = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(button),
+                                                "fc-node-index"));
+
+    if (idx < 0 || idx >= (int)FC_MAX_NODES) return;
+    ui->fc_node_enabled[idx] = gtk_toggle_button_get_active(button);
+}
+
+static void fc_set_all_node_checks(Ui *ui, bool active)
+{
+    for (int i = 0; i < ui->fc_node_check_count && i < (int)FC_MAX_NODES;
+         i++) {
+        ui->fc_node_enabled[i] = active;
+        if (ui->fc_node_checks[i] != NULL) {
+            gtk_toggle_button_set_active(
+                GTK_TOGGLE_BUTTON(ui->fc_node_checks[i]), active);
+        }
+    }
+}
+
+static void on_fc_check_all_clicked(GtkButton *button, gpointer user_data)
+{
+    (void)button;
+    fc_set_all_node_checks((Ui *)user_data, true);
+}
+
+static void on_fc_uncheck_all_clicked(GtkButton *button, gpointer user_data)
+{
+    (void)button;
+    fc_set_all_node_checks((Ui *)user_data, false);
+}
+
 static GtkWidget *build_fc_settings_page(Ui *ui)
 {
     GtkWidget *page = gtk_box_new(GTK_ORIENTATION_VERTICAL, PAGE_SPACING);
@@ -8358,6 +8408,50 @@ static GtkWidget *build_fc_settings_page(Ui *ui)
     }
     gtk_container_add(GTK_CONTAINER(frame), grid);
     gtk_box_pack_start(GTK_BOX(page), frame, FALSE, FALSE, 0);
+
+    /* which analyses to run (all checked by default) */
+    {
+        GtkWidget *aframe = gtk_frame_new("Analyses to run");
+        GtkWidget *scroll = gtk_scrolled_window_new(NULL, NULL);
+        GtkWidget *abox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+        GtkWidget *all_btn = gtk_button_new_with_label("Check all");
+        GtkWidget *none_btn = gtk_button_new_with_label("Uncheck all");
+        GtkWidget *buttons = gtk_flow_box_new();
+
+        gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(buttons),
+                                        GTK_SELECTION_NONE);
+        gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(buttons), PAGE_SPACING);
+        gtk_flow_box_insert(GTK_FLOW_BOX(buttons), all_btn, -1);
+        gtk_flow_box_insert(GTK_FLOW_BOX(buttons), none_btn, -1);
+        gtk_box_pack_start(GTK_BOX(abox), buttons, FALSE, FALSE, 2);
+        for (size_t i = 0; i < fc_node_count && i < FC_MAX_NODES; i++) {
+            char label[160];
+            GtkWidget *cb;
+
+            snprintf(label, sizeof(label), "%s (%s)", fc_node_specs[i].title,
+                     fc_node_specs[i].id);
+            cb = gtk_check_button_new_with_label(label);
+            g_object_set_data(G_OBJECT(cb), "fc-node-index",
+                              GINT_TO_POINTER((int)i));
+            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(cb),
+                                         ui->fc_node_enabled[i]);
+            g_signal_connect(cb, "toggled",
+                             G_CALLBACK(on_fc_node_check_toggled), ui);
+            ui->fc_node_checks[i] = cb;
+            gtk_box_pack_start(GTK_BOX(abox), cb, FALSE, FALSE, 0);
+            ui->fc_node_check_count = (int)i + 1;
+        }
+        g_signal_connect(all_btn, "clicked",
+                         G_CALLBACK(on_fc_check_all_clicked), ui);
+        g_signal_connect(none_btn, "clicked",
+                         G_CALLBACK(on_fc_uncheck_all_clicked), ui);
+        gtk_container_add(GTK_CONTAINER(scroll), abox);
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroll),
+                                       GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+        gtk_widget_set_size_request(scroll, -1, 220);
+        gtk_container_add(GTK_CONTAINER(aframe), scroll);
+        gtk_box_pack_start(GTK_BOX(page), aframe, TRUE, TRUE, 0);
+    }
     ui->fc_scope_radio_per = radio_per;
     ui->fc_scope_radio_merged = radio_merged;
     return page;
@@ -8424,6 +8518,9 @@ static GtkWidget *build_freq_counter_page(Ui *ui)
     GtkWidget *analysis_page;
     GtkWidget *settings_page;
 
+    fcd_list_init(&ui->fc_datasets);
+    for (size_t i = 0; i < FC_MAX_NODES; i++) ui->fc_node_enabled[i] = true;
+    ui->fc_node_check_count = 0;
     analysis_page = build_fc_analysis_page(ui);
     gtk_notebook_append_page(GTK_NOTEBOOK(right), analysis_page,
                              gtk_label_new("Analysis"));
@@ -8433,7 +8530,6 @@ static GtkWidget *build_freq_counter_page(Ui *ui)
     gtk_paned_pack1(GTK_PANED(paned), left, TRUE, FALSE);
     gtk_paned_pack2(GTK_PANED(paned), right, FALSE, FALSE);
     gtk_paned_set_position(GTK_PANED(paned), 620);
-    fcd_list_init(&ui->fc_datasets);
     fc_rebuild(ui, false);
     fc_show_details(ui);
     return paned;
