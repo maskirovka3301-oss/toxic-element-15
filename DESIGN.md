@@ -146,9 +146,10 @@ with marked peaks, and the ranked cyclic feature list.
 ## About screen
 
 **File > About** opens a modal screen whose background is the
-dark-industrial artwork with **Toxic Element 15**,
-**Daniel R. Azulay | Radio Defense** and **2026** overlaid in bold
-pale-green text with a black border. The artwork (`media/about.gif`) is
+dark-industrial artwork with **Toxic Element 15**, **RF Weapon Signals
+Intelligence** (tagline, drawn with an intermediate font size between the
+title and the lines below), **Daniel R. Azulay | Radio Defense** and
+**2026** overlaid in bold pale-green text with a black border. The artwork (`media/about.gif`) is
 converted to a C array by `tools/bin2c.c` at build time and **embedded in
 the executable**, so the screen never reads it from disk at run time; it
 closes only on an explicit user action (Escape/Return or the window's

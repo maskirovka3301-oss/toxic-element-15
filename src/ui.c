@@ -4002,6 +4002,7 @@ static void on_open_menu(GtkMenuItem *item, gpointer user_data)
 /* --- About screen ------------------------------------------------------- */
 
 #define ABOUT_TITLE   "Toxic Element 15"
+#define ABOUT_TAGLINE "RF Weapon Signals Intelligence"
 #define ABOUT_AUTHOR  "Daniel R. Azulay | Radio Defense"
 #define ABOUT_YEAR    "2026"
 #define ABOUT_WINDOW_W 900
@@ -4109,6 +4110,9 @@ static void about_render(cairo_t *cr, int w, int h)
         }
     }
     about_draw_text(cr, ABOUT_TITLE, w / 2.0, h * 0.46, h * 0.085);
+    /* the tagline sits between the title and the author line, with a size
+     * between theirs */
+    about_draw_text(cr, ABOUT_TAGLINE, w / 2.0, h * 0.545, h * 0.048);
     about_draw_text(cr, ABOUT_AUTHOR, w / 2.0, h * 0.62, h * 0.034);
     about_draw_text(cr, ABOUT_YEAR, w / 2.0, h * 0.70, h * 0.034);
 }
