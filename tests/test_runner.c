@@ -48,7 +48,9 @@
 #include "waterfall_cache.h"
 #include "streambuf.h"
 #include "lte_uplink.h"
+#include "dagcore.h"
 #include "fcdag.h"
+#include "fcreport.h"
 #include "freqseries.h"
 #include "renderbuf.h"
 
@@ -3455,12 +3457,12 @@ static void test_director(void)
     DirectorInput in;
     ModCandidate mods[2];
     SpreadCandidate spread[2];
-    DagRun dag;
+    DagRun *dag = dag_run_new();
     AnalysisResult *r;
 
     puts("\n-- Director --");
     fixture_init(&fx);
-    dag_reset(&dag);
+    dag_reset(dag);
 
     /* A0: classifier says OOK-ish; metrics; ranking */
     r = fixture_add(&fx, "analysis", "Baseline analysis", DAG_A0);
@@ -3476,25 +3478,25 @@ static void test_director(void)
     ar_num(r, "duty_cycle", 0.2, NULL, NULL);
     ar_num(r, "f0_hz", 38.0, "Hz", NULL);
     ar_num(r, "credible", 1, NULL, NULL);
-    dag_end(&dag, DAG_A2, true, 0.01);
+    dag_end(dag, DAG_A2, true, 0.01);
     r = fixture_add(&fx, "classic", "Classic envelope analysis", DAG_A1);
     ar_num(r, "period_hz", 39.4, "Hz", NULL);
-    dag_end(&dag, DAG_A1, true, 0.02);
+    dag_end(dag, DAG_A1, true, 0.02);
     r = fixture_add(&fx, "ccc", "Cyclic cumulants (AMR)", DAG_A8);
     ar_num(r, "valid", 1, NULL, NULL);
     ar_text(r, "verdict", "BPSK-like", NULL);
-    dag_end(&dag, DAG_A8, true, 0.03);
+    dag_end(dag, DAG_A8, true, 0.03);
     /* A4 skipped: must be discounted and reported */
     r = fixture_add(&fx, "cyclic", "FAM spectral correlation", DAG_A4);
     ar_set_status(r, AR_SKIPPED_USER, "wideband input: SSCA covers it");
-    dag_skip(&dag, DAG_A4, "wideband input: SSCA covers it");
+    dag_skip(dag, DAG_A4, "wideband input: SSCA covers it");
     /* A9 executed: uniform train */
     r = fixture_add(&fx, "intraburst", "Intra-burst envelope", DAG_A9);
     ar_num(r, "uniform", 1, NULL, NULL);
     ar_num(r, "delta_bic", 500, NULL, NULL);
     ar_num(r, "surrogate_fpr", 0.0, NULL, NULL);
     ar_text(r, "verdict", "uniform intra-burst pulse train", NULL);
-    dag_end(&dag, DAG_A9, true, 0.4);
+    dag_end(dag, DAG_A9, true, 0.4);
 
     memset(mods, 0, sizeof(mods));
     snprintf(mods[0].name, sizeof(mods[0].name), "OOK / pulsed emission");
@@ -3509,7 +3511,7 @@ static void test_director(void)
 
     memset(&in, 0, sizeof(in));
     in.analyses = &fx.set;
-    in.dag = &dag;
+    in.dag = dag;
     in.mods = mods;
     in.n_mods = 2;
     in.spread = spread;
@@ -3561,17 +3563,17 @@ static void test_director(void)
 
     /* an implausible pulse train falls back to the envelope fundamental */
     fixture_init(&fx);
-    dag_reset(&dag);
+    dag_reset(dag);
     r = fixture_add(&fx, "analysis", "Baseline analysis", DAG_A0);
     ar_text(r, "modulation", "OOK", NULL);
     r = fixture_add(&fx, "pulse", "Pulse-train analysis", DAG_A2);
     ar_num(r, "num_pulses", 9, NULL, NULL);
     ar_num(r, "credible", 0, NULL, NULL);
     ar_num(r, "f0_hz", 198.4, "Hz", NULL);
-    dag_end(&dag, DAG_A2, true, 0.01);
+    dag_end(dag, DAG_A2, true, 0.01);
     memset(&in, 0, sizeof(in));
     in.analyses = &fx.set;
-    in.dag = &dag;
+    in.dag = dag;
     director_build(&dir, &in);
     CHECK(strstr(dir.characterisation, "line-spectrum fundamental") != NULL);
     CHECK(strstr(dir.characterisation, "198.40 Hz") != NULL);
@@ -3579,12 +3581,12 @@ static void test_director(void)
 
     /* nothing but a classifier: the generic characterisation */
     fixture_init(&fx);
-    dag_reset(&dag);
+    dag_reset(dag);
     r = fixture_add(&fx, "analysis", "Baseline analysis", DAG_A0);
     ar_text(r, "modulation", "QAM/OFDM", NULL);
     memset(&in, 0, sizeof(in));
     in.analyses = &fx.set;
-    in.dag = &dag;
+    in.dag = dag;
     director_build(&dir, &in);
     CHECK(strstr(dir.characterisation, "emission with a QAM signature") != NULL);
     CHECK(dir.n_cand == 0);
@@ -3601,6 +3603,7 @@ static void test_director(void)
         director_mod_token("", tok, sizeof(tok));
         CHECK(tok[0] == '\0');
     }
+    dag_run_free(dag);
 }
 
 
@@ -4269,6 +4272,152 @@ static void write_text_file(const char *path, const char *text)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* The shared DAG engine                                              */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    size_t executed;
+    size_t order[8];
+    bool   fail_second;
+    bool   cancel_after_first;
+} DagCoreProbe;
+
+static bool probe_execute(void *ctx, DagCoreNode *node, char *err,
+                          size_t err_len)
+{
+    DagCoreProbe *p = (DagCoreProbe *)ctx;
+
+    (void)node;
+    if (p->executed == 1 && p->fail_second) {
+        snprintf(err, err_len, "synthetic failure");
+        return false;
+    }
+    p->order[p->executed] = p->executed;
+    p->executed++;
+    return true;
+}
+
+static const char *probe_skip(void *ctx, const DagCoreNodeSpec *spec)
+{
+    (void)ctx;
+    if (spec != NULL && spec->id != NULL && strcmp(spec->id, "skipped") == 0) {
+        return "not applicable to this input";
+    }
+    return NULL;
+}
+
+static bool probe_cancelled(void *ctx)
+{
+    DagCoreProbe *p = (DagCoreProbe *)ctx;
+
+    return p->cancel_after_first && p->executed >= 1;
+}
+
+static void test_dagcore(void)
+{
+    static const DagCoreNodeSpec specs[] = {
+        { "base", "Base analysis", NULL },
+        { "dependent", "Dependent analysis", "base" },
+        { "orphan", "Orphan analysis", "missing" },
+        { "skipped", "Skipped analysis", NULL },
+        { "after-skip", "Node after the skipped one", NULL }
+    };
+    DagCoreExec exec;
+    DagCoreProbe probe;
+    DagCoreRun *run;
+    char err[256] = "";
+
+    puts("\n-- Shared DAG engine --");
+    memset(&probe, 0, sizeof(probe));
+    memset(&exec, 0, sizeof(exec));
+    exec.execute = probe_execute;
+    exec.skip_reason = probe_skip;
+    exec.cancelled = probe_cancelled;
+    run = dagcore_execute(specs, 5, &exec, &probe, err, sizeof(err));
+    CHECK(run != NULL);
+    if (run != NULL) {
+        CHECK(run->count == 5);
+        CHECK(dagcore_find(run, "base") == 0);
+        CHECK(dagcore_find(run, "dependent") == 1);
+        CHECK(dagcore_find(run, "missing") == (size_t)-1);
+        CHECK(run->nodes[0].status == DAGCORE_DONE);
+        CHECK(run->nodes[1].status == DAGCORE_DONE);
+        CHECK(run->nodes[2].status == DAGCORE_SKIPPED);
+        CHECK(strstr(run->nodes[2].note, "not in the registry") != NULL);
+        CHECK(run->nodes[3].status == DAGCORE_SKIPPED);
+        CHECK(strcmp(run->nodes[3].note, "not applicable to this input") == 0);
+        CHECK(run->nodes[4].status == DAGCORE_DONE);
+        CHECK(probe.executed == 3);   /* base, dependent, after-skip */
+        CHECK(strcmp(dagcore_status_name(DAGCORE_DONE), "executed") == 0);
+        CHECK(strcmp(dagcore_status_name(DAGCORE_SKIPPED), "skipped") == 0);
+        CHECK(strcmp(dagcore_status_name(DAGCORE_FAILED), "failed") == 0);
+        dagcore_destroy(run, NULL);
+    }
+
+    /* a failing node is recorded as failed, its dependent is skipped */
+    memset(&probe, 0, sizeof(probe));
+    probe.fail_second = true;
+    run = dagcore_execute(specs, 2, &exec, &probe, err, sizeof(err));
+    CHECK(run != NULL);
+    if (run != NULL) {
+        CHECK(run->nodes[0].status == DAGCORE_DONE);
+        CHECK(run->nodes[1].status == DAGCORE_FAILED);
+        CHECK(strcmp(run->nodes[1].note, "synthetic failure") == 0);
+        dagcore_destroy(run, NULL);
+    }
+
+    /* prerequisites of a failed node are skipped, not executed */
+    {
+        static const DagCoreNodeSpec chain[] = {
+            { "a", "A", NULL },
+            { "b", "B", "a" },
+            { "c", "C", "b" }
+        };
+        DagCoreProbe p2;
+
+        memset(&p2, 0, sizeof(p2));
+        p2.fail_second = true;
+        run = dagcore_execute(chain, 3, &exec, &p2, err, sizeof(err));
+        CHECK(run != NULL);
+        if (run != NULL) {
+            CHECK(run->nodes[0].status == DAGCORE_DONE);
+            CHECK(run->nodes[1].status == DAGCORE_FAILED);
+            CHECK(run->nodes[2].status == DAGCORE_SKIPPED);
+            CHECK(strstr(run->nodes[2].note, "did not run") != NULL);
+            dagcore_destroy(run, NULL);
+        }
+    }
+
+    /* cancellation stops the walk */
+    memset(&probe, 0, sizeof(probe));
+    probe.cancel_after_first = true;
+    run = dagcore_execute(specs, 5, &exec, &probe, err, sizeof(err));
+    CHECK(run != NULL);
+    if (run != NULL) {
+        CHECK(run->cancelled);
+        CHECK(run->nodes[0].status == DAGCORE_DONE);
+        CHECK(run->nodes[4].status == DAGCORE_PENDING);
+        dagcore_destroy(run, NULL);
+    }
+
+    /* the Spectrum and Frequency Counter registries share this engine */
+    CHECK(fc_node_count == 0);
+    {
+        FreqSeriesList list;
+        FcRun *fc_run;
+
+        fsl_init(&list);
+        fc_run = fc_dag_run(&list, err, sizeof(err));
+        CHECK(fc_run != NULL);
+        if (fc_run != NULL) {
+            CHECK(fc_run->count == 0);
+            fc_dag_free(fc_run);
+        }
+        fsl_clear(&list);
+    }
+}
+
 static void test_freqseries(void)
 {
     FreqSeriesList list;
@@ -4351,7 +4500,7 @@ static void test_fcdag(void)
     CHECK(run != NULL);
     if (run != NULL) {
         CHECK(run->count == 0);
-        fc_dag_report(&list, run, &text, &md, &html);
+        fc_report(&list, run, &text, &md, &html);
         CHECK(text != NULL && md != NULL && html != NULL);
         if (text != NULL) {
             printf("  report: %zu chars, has header=%d, has DAG section=%d\n",
@@ -4891,6 +5040,7 @@ int main(void)
     test_cache_row();
     test_streambuf();
     test_renderbuf();
+    test_dagcore();
     test_freqseries();
     test_fcdag();
     test_rank_canonical();

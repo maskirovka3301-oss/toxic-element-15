@@ -376,20 +376,21 @@ void director_build(Director *d, const DirectorInput *in)
 
     /* ---- provenance: every DAG node and why it contributed ---- */
     if (in->dag != NULL) {
-        for (int n = 0; n < DAG_NODES && d->n_provenance < DIR_MAX_PROV; n++) {
-            DagState st = in->dag->state[n];
+        for (int n = 0; n < dag_node_count() && d->n_provenance < DIR_MAX_PROV;
+             n++) {
+            DagState st = dag_state(in->dag, n);
+            const char *skip = dag_skip_reason(in->dag, n);
 
-            if (st == DAG_PENDING) continue;
+            if (st == DAGCORE_PENDING) continue;
             snprintf(d->provenance[d->n_provenance],
                      sizeof(d->provenance[0]),
                      "%s: %s (%.2f s)%s%s", dag_node_name(n),
-                     dag_state_name(st), in->dag->elapsed[n],
-                     st == DAG_SKIPPED || st == DAG_FAILED ? " - " : "",
-                     in->dag->skip[n] != NULL ? in->dag->skip[n] : "");
+                     dag_state_name(st), dag_elapsed(in->dag, n),
+                     st == DAGCORE_SKIPPED || st == DAGCORE_FAILED ? " - " : "",
+                     skip != NULL ? skip : "");
             d->n_provenance++;
-            if (st == DAG_SKIPPED && in->dag->skip[n] != NULL) {
-                rationale(d, "%s discounted: %s", dag_node_name(n),
-                          in->dag->skip[n]);
+            if (st == DAGCORE_SKIPPED && skip != NULL) {
+                rationale(d, "%s discounted: %s", dag_node_name(n), skip);
             }
         }
     }

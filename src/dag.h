@@ -1,16 +1,19 @@
 /*
- * dag.h — the analysis DAG: node identities and per-run execution status.
+ * dag.h — the Spectrum tab's analysis DAG registry.
  *
- * The flow itself stays imperative in the analysis worker (the branching is
- * data dependent: A9 needs A8's cumulant carrier, A8 is conditional on
- * cyclic candidates, SSCA/FAM are alternatives), but every step records
- * begin/end/skip here so the Director knows what ran, what failed and why.
+ * The generic engine lives in dagcore.h: node identities, dependency
+ * ordering, statuses, skip rationales, timings and the registry walk are
+ * shared with the Frequency Counter tab. This module only defines the
+ * Spectrum node set (A0..A9 plus the post-DAG aggregations) and a thin,
+ * typed façade over the engine for the imperative analysis worker.
  */
 #ifndef TE15_DAG_H
 #define TE15_DAG_H
 
 #include <stdbool.h>
 #include <stddef.h>
+
+#include "dagcore.h"
 
 typedef enum {
     DAG_A0 = 0, /* baseline analysis + metrics + signal ranking        */
@@ -29,26 +32,26 @@ typedef enum {
     DAG_NODES
 } DagNode;
 
-typedef enum {
-    DAG_PENDING = 0,
-    DAG_RUNNING,
-    DAG_DONE,
-    DAG_SKIPPED,
-    DAG_FAILED
-} DagState;
-
-typedef struct {
-    DagState    state[DAG_NODES];
-    const char *skip[DAG_NODES];   /* reason for SKIPPED/FAILED          */
-    double      elapsed[DAG_NODES];/* wall time in seconds               */
-} DagRun;
+typedef DagCoreStatus DagState;
+typedef DagCoreRun DagRun;
 
 const char *dag_node_name(int node);
 const char *dag_state_name(DagState st);
+int         dag_node_count(void);
 
-void dag_reset(DagRun *run);
+/* Create/reset the run of the Spectrum registry. */
+DagRun *dag_run_new(void);
+void    dag_run_free(DagRun *run);
+void    dag_reset(DagRun *run);
+
 void dag_begin(DagRun *run, int node);
 void dag_end(DagRun *run, int node, bool ok, double elapsed_s);
 void dag_skip(DagRun *run, int node, const char *why);
+
+/* Accessors (the run is shared with the engine, so callers never touch the
+ * engine's fields directly). */
+DagState    dag_state(const DagRun *run, int node);
+double      dag_elapsed(const DagRun *run, int node);
+const char *dag_skip_reason(const DagRun *run, int node);
 
 #endif /* TE15_DAG_H */

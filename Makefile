@@ -34,7 +34,10 @@ APP_SRC := \
 	src/streambuf.c \
 	src/renderbuf.c \
 	src/freqseries.c \
+	src/dagcore.c \
+	src/dag.c \
 	src/fcdag.c \
+	src/fcreport.c \
 	src/lte_uplink.c \
 	src/analysis.c \
 	src/metrics.c \
@@ -62,7 +65,6 @@ APP_SRC := \
 	src/report.c \
 	src/aconfig.c \
 	src/aregistry.c \
-	src/dag.c \
 	src/aresult.c \
 	src/synth.c \
 	src/ui.c
@@ -80,7 +82,9 @@ TEST_SRC := \
 	src/streambuf.c \
 	src/renderbuf.c \
 	src/freqseries.c \
+	src/dagcore.c \
 	src/fcdag.c \
+	src/fcreport.c \
 	src/lte_uplink.c \
 	src/analysis.c \
 	src/metrics.c \
@@ -122,9 +126,9 @@ ABOUT_IMAGE := build/about_image.c
 
 # The About artwork is embedded in the executable (generated from the JPEG
 # at build time; nothing is read from media/ at run time).
-$(ABOUT_IMAGE): media/about.jpg tools/bin2c.c | build
+$(ABOUT_IMAGE): media/about.gif tools/bin2c.c | build
 	$(CC) -O1 -o build/bin2c tools/bin2c.c
-	./build/bin2c media/about.jpg te15_about_jpeg > $@.tmp && mv $@.tmp $@
+	./build/bin2c media/about.gif te15_about_image > $@.tmp && mv $@.tmp $@
 
 build/te15: $(APP_SRC) $(ABOUT_IMAGE) src/*.h | build
 	$(CC) $(ALL_CFLAGS) -o $@ $(APP_SRC) $(ABOUT_IMAGE) $(LDLIBS)
@@ -140,8 +144,8 @@ golden: build/golden_report
 
 GOLDEN_SRC := $(filter-out src/main.c src/ui.c,$(APP_SRC))
 
-build/golden_report: tests/golden_report.c $(GOLDEN_SRC) src/*.h | build
-	$(CC) $(ALL_CFLAGS) -o $@ tests/golden_report.c $(GOLDEN_SRC) $(LDLIBS)
+build/golden_report: tests/golden_report.c $(GOLDEN_SRC) $(ABOUT_IMAGE) src/*.h | build
+	$(CC) $(ALL_CFLAGS) -o $@ tests/golden_report.c $(GOLDEN_SRC) $(ABOUT_IMAGE) $(LDLIBS)
 
 test: build/test_runner
 	./build/test_runner

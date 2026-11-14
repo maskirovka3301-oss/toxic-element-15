@@ -24,6 +24,11 @@ IQ), same behaviour, cleaner structure.
 | `fluct.h/.c`      | Burel fluctuation-of-autocorrelation DSSS detector (windowed variance of the ACF estimate, normalised F(tau) = T·Var/sigma^4) |
 | `cpar.h/.c`       | Cumulative Peak-to-Average Ratio DSSS detector (FFT windowed ACF, global-baseline PAR per peak, CPAR criterion, code-period + chip-period recovery) |
 | `hos.h/.c`        | Higher-order statistics: 2nd-6th order cumulants (Swami & Sadler), normalised |C40|/|C41|/|C42| over C21^2, Gaussian-suppression verdict, bicoherence bispectrum |
+| `dagcore.h/.c`    | Generic analysis-DAG engine: node registry, dependency ordering, statuses, skip rationales, timings, cancellation, progress; used by both the Spectrum and Frequency Counter panes |
+| `dag.h/.c`        | Spectrum analysis node registry (A0..A9, post-DAG aggregations) and typed façade over `dagcore` |
+| `freqseries.h/.c` | Frequency-measurement sessions: load text files, metadata, deep copy |
+| `fcdag.h/.c`      | Frequency Counter analysis registry on `dagcore` (empty until the algorithms are defined) |
+| `fcreport.h/.c`   | Frequency Counter report rendering (text/Markdown/HTML from one document model) |
 | `ui.h/.c`         | GTK3 UI: waterfall widget, controls, selection, timeline scrollbar + RFC 3339 scrub tooltip, analysis popup, demod player, cyclostationary window, fluctuation window, menu bar |
 | `main.c`          | CLI parsing, wiring, `--check` headless verification mode, File>Open integration |
 
@@ -143,7 +148,7 @@ with marked peaks, and the ranked cyclic feature list.
 **File > About** opens a modal screen whose background is the
 dark-industrial artwork with **Toxic Element 15**,
 **Daniel R. Azulay | Radio Defense** and **2026** overlaid in bold
-pale-green text with a black border. The JPEG (`media/about.jpg`) is
+pale-green text with a black border. The artwork (`media/about.gif`) is
 converted to a C array by `tools/bin2c.c` at build time and **embedded in
 the executable**, so the screen never reads it from disk at run time; it
 closes only on an explicit user action (Escape/Return or the window's
@@ -164,13 +169,16 @@ progress bar, Text/Markdown/HTML report selector, Save report and a
 read-only report view, mirroring the Selection tab) and an empty
 **Settings** page.
 
-The Analysis page is driven by `fcdag.h/.c`, a DAG backend that mirrors
-the Spectrum tab's pipeline (registry of analyses, dependency-ordered
-execution with per-node status and skip rationales, consolidated report
-rendered as text/Markdown/HTML) but operates on the loaded sessions. Its
-registry `fc_nodes[]` is currently empty on purpose: the execution
-framework runs with zero nodes and the report states that no analyses are
-implemented yet; analyses can be added to the registry later. The docked pane can be detached into its own window and
+The Analysis page is driven by the shared DAG engine in `dagcore.h/.c`:
+node identities, dependency ordering, statuses with skip rationales,
+timings, cancellation and progress all live there, and both panes use it
+the same way. The Spectrum pane keeps its imperative worker (its branching
+is data dependent) and records each step through the engine's explicit
+begin/end/skip API via its `dag.h` façade; the Frequency Counter defines
+its own registry (`fcdag.h/.c`, still empty - analyses to be defined) and
+lets the engine walk it with an executor callback. Report rendering is a
+separate concern: `report.h/.c` renders the Spectrum document and
+`fcreport.h/.c` the frequency-counter document, each in text/Markdown/HTML. The docked pane can be detached into its own window and
 re-attached, and its Settings tab comes last.
 
 ## Docked analysis pane

@@ -43,6 +43,7 @@
 #include "debug.h"
 #include "about_image.h"
 #include "fcdag.h"
+#include "fcreport.h"
 #include "freqseries.h"
 #include "fit.h"
 #include "wav.h"
@@ -2138,11 +2139,11 @@ static gpointer report_worker(gpointer data)
      * per-run DAG status. The Director reads these after the DAG. */
     ArArena *arena = ar_arena_new();
     ArSet envelopes;
-    DagRun dag;
+    DagRun *dag = dag_run_new();
     gint64 node_t0 = g_get_monotonic_time();
 
     ar_set_init(&envelopes, arena);
-    dag_reset(&dag);
+    dag_reset(dag);
 
     hb.job = job;
     hb.stop = 0;
@@ -2193,7 +2194,7 @@ static gpointer report_worker(gpointer data)
 
     memset(&sot, 0, sizeof(sot));
     {
-        AnalysisResult *ar = node_begin(&envelopes, &dag, "sot", DAG_SOT,
+        AnalysisResult *ar = node_begin(&envelopes, dag, "sot", DAG_SOT,
                                         &node_t0);
         bool ok = sot_prepare(src, &job->region, &sot) != 0;
 
@@ -2202,7 +2203,7 @@ static gpointer report_worker(gpointer data)
                      sot.noise_floor_db, sot.n, sot.view.sample_rate);
             apub_set_confidence(ar, 1.0);
         }
-        node_end(ar, &dag, DAG_SOT, node_t0, ok,
+        node_end(ar, dag, DAG_SOT, node_t0, ok,
                  ok ? NULL : "could not prepare the common analysis source");
         if (ok) {
             s = &sot.view;
@@ -2254,7 +2255,7 @@ static gpointer report_worker(gpointer data)
                 apub_metrics(ar, &metrics);
                 apub_set_confidence(ar, 1.0);
             }
-            dag_end(&dag, DAG_A0, ok, 0.0);
+            dag_end(dag, DAG_A0, ok, 0.0);
         }
         job_advance(job, &done, "baseline analysis (analysis + metrics + ranking)", &stage_start);
     }
@@ -2273,7 +2274,7 @@ static gpointer report_worker(gpointer data)
      * not executed records its rationale for the report. */
     ran_a1 = true;
     {
-        AnalysisResult *ar = node_begin(&envelopes, &dag, "classic", DAG_A1,
+        AnalysisResult *ar = node_begin(&envelopes, dag, "classic", DAG_A1,
                                         &node_t0);
 
         ok_classic = classic_analyze(s, &sreg, 0.0, &classic);
@@ -2282,7 +2283,7 @@ static gpointer report_worker(gpointer data)
             apub_set_confidence(ar, (ok_classic && classic.period_hz > 0.0)
                                         ? 1.0 : 0.3);
         }
-        node_end(ar, &dag, DAG_A1, node_t0, ok_classic, NULL);
+        node_end(ar, dag, DAG_A1, node_t0, ok_classic, NULL);
     }
     job_advance(job, &done, "classic analysis", &stage_start);
     if (job->cancelled) {
@@ -2290,7 +2291,7 @@ static gpointer report_worker(gpointer data)
     }
     ran_a2 = true;
     {
-        AnalysisResult *ar = node_begin(&envelopes, &dag, "pulse", DAG_A2,
+        AnalysisResult *ar = node_begin(&envelopes, dag, "pulse", DAG_A2,
                                         &node_t0);
 
         ok_pulse = pulse_analyze(s, &sreg, &pulse);
@@ -2299,7 +2300,7 @@ static gpointer report_worker(gpointer data)
             apub_set_confidence(ar, ok_pulse
                                         ? (pulse.credible ? 1.0 : 0.35) : 0.0);
         }
-        node_end(ar, &dag, DAG_A2, node_t0, ok_pulse, NULL);
+        node_end(ar, dag, DAG_A2, node_t0, ok_pulse, NULL);
     }
     job_advance(job, &done, "pulse-train analysis", &stage_start);
     if (job->cancelled) {
@@ -2307,7 +2308,7 @@ static gpointer report_worker(gpointer data)
     }
     ran_a3 = true;
     {
-        AnalysisResult *ar = node_begin(&envelopes, &dag, "hos", DAG_A3,
+        AnalysisResult *ar = node_begin(&envelopes, dag, "hos", DAG_A3,
                                         &node_t0);
 
         ok_hos = hos_analyze(s, &sreg, &hos);
@@ -2315,7 +2316,7 @@ static gpointer report_worker(gpointer data)
             apub_hos(ar, &hos);
             apub_set_confidence(ar, ok_hos ? 1.0 : 0.0);
         }
-        node_end(ar, &dag, DAG_A3, node_t0, ok_hos, NULL);
+        node_end(ar, dag, DAG_A3, node_t0, ok_hos, NULL);
     }
     job_advance(job, &done, "higher-order statistics", &stage_start);
     if (job->cancelled) {
@@ -2333,7 +2334,7 @@ static gpointer report_worker(gpointer data)
         /* D6 yes: SSCA is the wideband cycle-frequency search */
         ran_a5 = true;
         {
-            AnalysisResult *ar = node_begin(&envelopes, &dag, "ssca", DAG_A5,
+            AnalysisResult *ar = node_begin(&envelopes, dag, "ssca", DAG_A5,
                                             &node_t0);
 
             ok_ssca = ssca_analyze(s, &sreg, &ssca);
@@ -2343,7 +2344,7 @@ static gpointer report_worker(gpointer data)
                                             ? (ssca.cf_count > 0 ? 1.0 : 0.4)
                                             : 0.0);
             }
-            node_end(ar, &dag, DAG_A5, node_t0, ok_ssca, NULL);
+            node_end(ar, dag, DAG_A5, node_t0, ok_ssca, NULL);
         }
         job_advance(job, &done, "SSCA", &stage_start);
         if (job->cancelled) {
@@ -2353,12 +2354,12 @@ static gpointer report_worker(gpointer data)
         skip_a4 = "wideband/OFDM-like input: the heavier SSCA search covers "
                   "the cycle frequencies, so the conventional FAM estimate "
                   "was not needed";
-        node_skip(&envelopes, &dag, "cyclic", DAG_A4, skip_a4);
+        node_skip(&envelopes, dag, "cyclic", DAG_A4, skip_a4);
     } else {
         /* D6 no: conventional cyclostationary analysis (A4) */
         ran_a4 = true;
         {
-            AnalysisResult *ar = node_begin(&envelopes, &dag, "cyclic", DAG_A4,
+            AnalysisResult *ar = node_begin(&envelopes, dag, "cyclic", DAG_A4,
                                             &node_t0);
 
             ok_fam = cyclic_analyze_ex(s, &sreg, false, &cyclic);
@@ -2369,7 +2370,7 @@ static gpointer report_worker(gpointer data)
                                                                      : 0.4)
                                             : 0.0);
             }
-            node_end(ar, &dag, DAG_A4, node_t0, ok_fam, NULL);
+            node_end(ar, dag, DAG_A4, node_t0, ok_fam, NULL);
         }
         job_advance(job, &done, "FAM", &stage_start);
         if (job->cancelled) {
@@ -2381,7 +2382,7 @@ static gpointer report_worker(gpointer data)
              * may be wideband/noise-like: run the SSCA search */
             ran_a5 = true;
             {
-                AnalysisResult *ar = node_begin(&envelopes, &dag, "ssca",
+                AnalysisResult *ar = node_begin(&envelopes, dag, "ssca",
                                                 DAG_A5, &node_t0);
 
                 ok_ssca = ssca_analyze(s, &sreg, &ssca);
@@ -2392,7 +2393,7 @@ static gpointer report_worker(gpointer data)
                                                                      : 0.4)
                                                 : 0.0);
                 }
-                node_end(ar, &dag, DAG_A5, node_t0, ok_ssca, NULL);
+                node_end(ar, dag, DAG_A5, node_t0, ok_ssca, NULL);
             }
             job_advance(job, &done, "SSCA", &stage_start);
             if (job->cancelled) {
@@ -2406,14 +2407,14 @@ static gpointer report_worker(gpointer data)
             skip_a5 = "the conventional cyclostationary analysis already "
                       "produced candidate cycle frequencies; the heavier "
                       "SSCA search was not required";
-            node_skip(&envelopes, &dag, "ssca", DAG_A5, skip_a5);
+            node_skip(&envelopes, dag, "ssca", DAG_A5, skip_a5);
         }
     }
     if (d4_have_cf) {
         /* A6: validation by the CFAR / whitened / multi-cycle detectors */
         ran_a6 = true;
         {
-            AnalysisResult *ar = node_begin(&envelopes, &dag, "cycledet",
+            AnalysisResult *ar = node_begin(&envelopes, dag, "cycledet",
                                             DAG_A6, &node_t0);
 
             ok_cycledet = cycledet_analyze(s, &sreg, &cycledet);
@@ -2423,10 +2424,10 @@ static gpointer report_worker(gpointer data)
                                             ? (cycledet.detected ? 1.0 : 0.4)
                                             : 0.0);
             }
-            node_end(ar, &dag, DAG_A6, node_t0, ok_cycledet, NULL);
+            node_end(ar, dag, DAG_A6, node_t0, ok_cycledet, NULL);
         }
         {
-            AnalysisResult *ar = node_begin(&envelopes, &dag, "cpar", DAG_A6,
+            AnalysisResult *ar = node_begin(&envelopes, dag, "cpar", DAG_A6,
                                             &node_t0);
 
             ok_cpar = cpar_analyze(s, &sreg, &cpar);
@@ -2436,7 +2437,7 @@ static gpointer report_worker(gpointer data)
                                             ? (cpar.detected ? 1.0 : 0.4)
                                             : 0.0);
             }
-            node_end(ar, &dag, DAG_A6, node_t0, ok_cpar, NULL);
+            node_end(ar, dag, DAG_A6, node_t0, ok_cpar, NULL);
         }
         job_advance(job, &done, "CPAR", &stage_start);
         if (job->cancelled) {
@@ -2451,14 +2452,14 @@ static gpointer report_worker(gpointer data)
     } else {
         skip_a6 = "no candidate cycle frequencies: validating detectors "
                   "without candidates would only invite false positives";
-        node_skip(&envelopes, &dag, "cycledet", DAG_A6, skip_a6);
-        node_skip(&envelopes, &dag, "cpar", DAG_A6, skip_a6);
+        node_skip(&envelopes, dag, "cycledet", DAG_A6, skip_a6);
+        node_skip(&envelopes, dag, "cpar", DAG_A6, skip_a6);
     }
     if (d4_have_cf) {
         /* A8: cyclic cumulants / AMR at the candidate cycle frequencies */
         ran_a8 = true;
         {
-            AnalysisResult *ar = node_begin(&envelopes, &dag, "ccc", DAG_A8,
+            AnalysisResult *ar = node_begin(&envelopes, dag, "ccc", DAG_A8,
                                             &node_t0);
 
             ok_ccc = ccc_analyze(s, &sreg, &ccc);
@@ -2466,7 +2467,7 @@ static gpointer report_worker(gpointer data)
                 apub_ccc(ar, &ccc);
                 apub_set_confidence(ar, ok_ccc ? (ccc.valid ? 1.0 : 0.4) : 0.0);
             }
-            node_end(ar, &dag, DAG_A8, node_t0, ok_ccc, NULL);
+            node_end(ar, dag, DAG_A8, node_t0, ok_ccc, NULL);
         }
         job_advance(job, &done, "cyclic cumulants", &stage_start);
         if (job->cancelled) {
@@ -2475,7 +2476,7 @@ static gpointer report_worker(gpointer data)
     } else {
         skip_a8 = "cyclic cumulants need a candidate carrier/cycle "
                   "frequency, and none was found";
-        node_skip(&envelopes, &dag, "ccc", DAG_A8, skip_a8);
+        node_skip(&envelopes, dag, "ccc", DAG_A8, skip_a8);
     }
     /* A9: intra-burst time-domain envelope inspection - only for a
      * bursty/pulsed signature (a burst to zoom into). Runs after the
@@ -2489,7 +2490,7 @@ static gpointer report_worker(gpointer data)
         if (bursty) {
             ran_a9 = true;
             {
-                AnalysisResult *ar = node_begin(&envelopes, &dag, "intraburst",
+                AnalysisResult *ar = node_begin(&envelopes, dag, "intraburst",
                                                 DAG_A9, &node_t0);
 
                 ok_intraburst = intraburst_analyze_sot(
@@ -2501,7 +2502,7 @@ static gpointer report_worker(gpointer data)
                                                        ? 0.9 : 0.45)
                                                 : 0.0);
                 }
-                node_end(ar, &dag, DAG_A9, node_t0, ok_intraburst, NULL);
+                node_end(ar, dag, DAG_A9, node_t0, ok_intraburst, NULL);
             }
             job_advance(job, &done, "intra-burst analysis", &stage_start);
             if (job->cancelled) {
@@ -2510,7 +2511,7 @@ static gpointer report_worker(gpointer data)
         } else {
             skip_a9 = "the signal is not bursty/pulsed, so there is no "
                       "burst to zoom into";
-            node_skip(&envelopes, &dag, "intraburst", DAG_A9, skip_a9);
+            node_skip(&envelopes, dag, "intraburst", DAG_A9, skip_a9);
         }
     }
 
@@ -2519,7 +2520,7 @@ static gpointer report_worker(gpointer data)
          * spread-spectrum signals runs when the detectors failed */
         ran_a7 = true;
         {
-            AnalysisResult *ar = node_begin(&envelopes, &dag, "fluct", DAG_A7,
+            AnalysisResult *ar = node_begin(&envelopes, dag, "fluct", DAG_A7,
                                             &node_t0);
 
             ok_fluct = fluct_analyze(s, &sreg, &fluct);
@@ -2529,7 +2530,7 @@ static gpointer report_worker(gpointer data)
                                             ? (fluct.detected ? 1.0 : 0.4)
                                             : 0.0);
             }
-            node_end(ar, &dag, DAG_A7, node_t0, ok_fluct, NULL);
+            node_end(ar, dag, DAG_A7, node_t0, ok_fluct, NULL);
         }
         job_advance(job, &done, "autocorrelation fluctuation (Burel)", &stage_start);
         if (job->cancelled) {
@@ -2538,7 +2539,7 @@ static gpointer report_worker(gpointer data)
     } else {
         skip_a7 = "validated cyclic features are present, so the "
                   "spread-spectrum/noise diagnostic was unnecessary";
-        node_skip(&envelopes, &dag, "fluct", DAG_A7, skip_a7);
+        node_skip(&envelopes, dag, "fluct", DAG_A7, skip_a7);
     }
     if (!skip_a5[0] && !ran_a5) {
         skip_a5 = "not selected by the DAG";
@@ -2590,7 +2591,7 @@ static gpointer report_worker(gpointer data)
             apub_modconf(ar, job->job_mods, job->job_mod_count);
             apub_set_confidence(ar, job->job_mod_count > 0
                                         ? job->job_mods[0].score / 100.0 : 0.0);
-            dag_end(&dag, DAG_MODCONF, true, 0.0);
+            dag_end(dag, DAG_MODCONF, true, 0.0);
         }
         ar = ar_add(&envelopes, "signals", "Signal database match", DAG_A0);
         if (ar != NULL) {
@@ -2636,7 +2637,7 @@ static gpointer report_worker(gpointer data)
             apub_ssclass(ar, spread, spread_n);
             apub_set_confidence(ar, spread_n > 0
                                         ? spread[0].score / 100.0 : 0.0);
-            dag_end(&dag, DAG_SSCLASS, true, 0.0);
+            dag_end(dag, DAG_SSCLASS, true, 0.0);
         }
     }
 
@@ -2697,7 +2698,7 @@ static gpointer report_worker(gpointer data)
         in.anomaly = job->anomaly != 0;
         in.anomaly_explain = job->anomaly_explain;
         in.envelopes = &envelopes;
-        in.dag = &dag;
+        in.dag = dag;
         in.ran = (typeof(in.ran)){ ran_a1, ran_a2, ran_a3, ran_a4, ran_a5,
                                    ran_a6, ran_a7, ran_a8, ran_a9 };
         in.ok = (typeof(in.ok)){ ok_a0, ok_classic, ok_pulse, ok_hos,
@@ -2777,6 +2778,7 @@ static gpointer report_worker(gpointer data)
     g_atomic_int_set(&job->progress, REPORT_TOTAL_MAX);
     g_atomic_int_set(&job->total, REPORT_TOTAL_MAX);
     g_atomic_int_set(&job->done, 1);
+    dag_run_free(dag);
     /* the worker never frees the job: hand it back via an idle callback */
     g_idle_add(job->cancelled ? job_discard : report_deliver, job);
     return NULL;
@@ -4005,7 +4007,7 @@ static void on_open_menu(GtkMenuItem *item, gpointer user_data)
 static GtkWidget *about_window = NULL;
 static cairo_surface_t *about_image = NULL;
 
-/* Decode the embedded About artwork (a JPEG in the executable; nothing is
+/* Decode the embedded About artwork (an image in the executable; nothing is
  * read from disk at run time). The surface is cached. */
 static cairo_surface_t *about_image_load(void)
 {
@@ -4016,7 +4018,7 @@ static cairo_surface_t *about_image_load(void)
     if (about_image != NULL) return about_image;
     loader = gdk_pixbuf_loader_new();
     if (loader == NULL) return NULL;
-    if (!gdk_pixbuf_loader_write(loader, te15_about_jpeg, te15_about_jpeg_len,
+    if (!gdk_pixbuf_loader_write(loader, te15_about_image, te15_about_image_len,
                                  &err) ||
         !gdk_pixbuf_loader_close(loader, &err)) {
         if (err != NULL) {
@@ -7669,8 +7671,8 @@ static gpointer fc_worker(gpointer data)
     } else {
         job->nodes = run->count;
         job->elapsed_s = run->elapsed_s;
-        fc_dag_report(&job->snapshot, run, &job->text, &job->markdown,
-                      &job->html);
+        fc_report(&job->snapshot, run, &job->text, &job->markdown,
+                  &job->html);
         fc_dag_free(run);
     }
     g_idle_add(fc_deliver, job);
