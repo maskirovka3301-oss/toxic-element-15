@@ -250,6 +250,47 @@ induced-lattice clustering was detected, the CF slope when the K=1
 residual dispersion cannot serve as a single-subcarrier reference, and the
 MDL node always (no signal data).
 
+### Combined source hypothesis test
+
+The final DAG node (`hypothesis`, "Source test: subcarrier lattice vs
+chance (combined)") answers the question the other analyses prepare: are the
+measurements better explained by one or more subcarriers with a common
+spacing, or can we not conclude that? It runs after the evidence screen and
+uses the results retained for the synthesis to pick, for every block, the
+spacing with the strongest retained evidence, then tests that spacing
+directly on the (drift-corrected) measurements:
+
+* the test statistic is the Rayleigh/von Mises mean resultant length on the
+  folded phases (Mardia & Jupp, *Directional Statistics*, 2000; the von
+  Mises concentration kappa is estimated from R with the Fisher 1993
+  approximation);
+* the p-value is a permutation p-value with the Phipson & Smyth (2010)
+  +1 correction, `p = (hits+1)/(B+1)`, B = 999, against uniform
+  frequencies inside the block's observed span;
+* because the spacing is chosen by a scan over candidate numerologies, the
+  permutation uses the Westfall-Young (1993) max statistic over all eligible
+  candidate spacings (those completing at least two lattice cycles in the
+  block span), which controls the selection multiplicity;
+* the independent per-block p-values are combined with Fisher's combined
+  probability test (chi2 = -2 sum ln p, df = 2m) and the per-block
+  p-values are also reported after a Benjamini-Hochberg adjustment;
+* the implied number of averaged subcarriers K is taken from the mixture /
+  BIC evidence for the winning spacing.
+
+The table reports, per block, the number of measurements, the spacing, R,
+kappa, the phase dispersion, the max statistic, the permutation p-value and
+its BH q-value, plus a combined row with the Fisher statistic, df and
+combined p-value. The notes report the alpha (0.05), the combined p-value,
+the best-supported spacing and K, and a plain-language verdict: the data
+support one or more subcarriers with that spacing (with K), or the data
+cannot conclude (too little data, combined p >= alpha, or evidence that is
+not consistent across independent test families). The caveats state that
+blocks are treated as independent samples of the same device, that a common
+lattice offset cannot be identified from frequencies alone, and that the
+retained analyses' own p-values are not re-counted in the combination (a
+direct per-block test is), so dependent family evidence is summarised but
+not double-counted.
+
 The peak strip shows the mean spectrum of the waterfall pixel rows that
 are on screen, averaged over up to 128 evenly spaced rows fetched from the
 render buffer through the same row mapping the renderer uses (so its peaks

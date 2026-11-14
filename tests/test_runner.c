@@ -4440,7 +4440,7 @@ static void test_dagcore(void)
     }
 
     /* the Spectrum and Frequency Counter registries share this engine */
-    CHECK(fc_node_count == 21);
+    CHECK(fc_node_count == 22);
     {
         FcDatasetList list;
         FcRun *fc_run;
@@ -5418,6 +5418,32 @@ static void test_fclattice(void)
                                    NULL));
                         continue;
                     }
+                    if (strcmp(id, "hypothesis") == 0) {
+                        /* the combined source test: done when evidence was
+                         * retained, skipped (with a rationale) otherwise */
+                        CHECK(run->nodes[i].status == DAGCORE_DONE ||
+                              (run->nodes[i].status == DAGCORE_SKIPPED &&
+                               strstr(run->nodes[i].note, "evidence") !=
+                                   NULL));
+                        if (run->nodes[i].status == DAGCORE_DONE) {
+                            FclTable *ht =
+                                (FclTable *)run->nodes[i].payload;
+
+                            CHECK(ht != NULL);
+                            if (ht != NULL) {
+                                CHECK(ht->title != NULL &&
+                                      strstr(ht->title, "Source test") !=
+                                          NULL);
+                                CHECK(ht->n_rows > 0);
+                                CHECK(ht->notes != NULL &&
+                                      strstr(ht->notes, "Verdict:") != NULL);
+                                CHECK(ht->notes != NULL &&
+                                      strstr(ht->notes, "Alpha: 0.05") !=
+                                          NULL);
+                            }
+                        }
+                        continue;
+                    }
                     CHECK(run->nodes[i].status == DAGCORE_DONE);
                     CHECK(run->nodes[i].payload != NULL);
                     done += run->nodes[i].status == DAGCORE_DONE ? 1 : 0;
@@ -5435,6 +5461,9 @@ static void test_fclattice(void)
                 CHECK(text != NULL && strstr(text, "subcarrier") != NULL);
                 CHECK(text != NULL && strstr(text, "ANALYSES") != NULL);
                 CHECK(text != NULL && strstr(text, "15.0") != NULL);
+                CHECK(text != NULL && strstr(text, "Source test") != NULL);
+                CHECK(text != NULL && strstr(text, "Verdict:") != NULL);
+                CHECK(text != NULL && strstr(text, "Westfall") != NULL);
                 CHECK(md != NULL && strstr(md, "| Block |") != NULL);
                 CHECK(html != NULL && strstr(html, "<table") != NULL);
                 free(text);
@@ -5463,7 +5492,7 @@ static void test_fcdag(void)
 
     puts("\n-- Frequency Counter analysis DAG --");
     fcd_list_init(&list);
-    CHECK(fc_node_count == 21);   /* the subcarrier-lattice test chain */
+    CHECK(fc_node_count == 22);   /* the subcarrier-lattice test chain */
     {
         /* every analysis in the DAG is a registry node with an executor,
          * so the Settings checkboxes (built from the same registry) can
@@ -5484,6 +5513,16 @@ static void test_fcdag(void)
     if (run != NULL) {
         CHECK(run->count == fc_node_count);
         CHECK(run->nodes[0].status == DAGCORE_SKIPPED);
+        {
+            size_t hyp = dagcore_find(run, "hypothesis");
+
+            CHECK(hyp != (size_t)-1);
+            if (hyp != (size_t)-1) {
+                CHECK(run->nodes[hyp].status == DAGCORE_SKIPPED);
+                CHECK(strstr(run->nodes[hyp].note, "prerequisite") != NULL ||
+                      strstr(run->nodes[hyp].note, "evidence") != NULL);
+            }
+        }
         fc_report(&list, run, FCL_SCOPE_PER_DATASET, &text, &md,
                           &html);
         CHECK(text != NULL && md != NULL && html != NULL);
@@ -5493,7 +5532,7 @@ static void test_fcdag(void)
                                      NULL,
                    strstr(text, "DAG") != NULL);
             CHECK(strstr(text, "FREQUENCY COUNTER ANALYSIS REPORT") != NULL);
-            CHECK(strstr(text, "Registry: 21 analyses") != NULL);
+            CHECK(strstr(text, "Registry: 22 analyses") != NULL);
             CHECK(strstr(text, "schema: fc_dataset.json") != NULL);
             CHECK(strstr(text, "Rayleigh") != NULL ||
                   strstr(text, "Measurement blocks") != NULL);
@@ -5510,6 +5549,111 @@ static void test_fcdag(void)
         fc_dag_free(run);
     }
     fcd_list_clear(&list);
+}
+
+/* The combined source test: a lattice dataset must be called supported, a
+ * uniform (no-lattice) dataset must be called inconclusive. Both are fed
+ * through the whole DAG from JSON files, so the node really runs. */
+static void test_fc_hypothesis(void)
+{
+    static const char *lattice_path = "/tmp/te15_hyp_lattice.json";
+    static const char *uniform_path = "/tmp/te15_hyp_uniform.json";
+    char json[32768];
+    size_t pos;
+    FILE *f;
+    int kind;
+
+    puts("\n-- Frequency Counter source hypothesis test --");
+    for (kind = 0; kind < 2; kind++) {
+        FcDatasetList list;
+        FcRun *run;
+        char err[256] = "";
+        size_t hyp;
+        const char *path = kind == 0 ? lattice_path : uniform_path;
+
+        pos = 0;
+        pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
+                                "{ \"dataset_id\": \"%s\", "
+                                "\"source_file\": \"synth.csv\", "
+                                "\"title\": \"%s\", \"notes\": [], "
+                                "\"sessions\": [ { \"session_id\": 1, "
+                                "\"rounds\": [ { \"round_id\": \"r1\", "
+                                "\"location\": null, \"date\": null, "
+                                "\"coordinates\": null, "
+                                "\"closest_towers_enb_ids\": null, "
+                                "\"context\": null, "
+                                "\"subjects_listed\": [], "
+                                "\"subjects\": [ { \"name\": \"rx\", "
+                                "\"measurements\": [",
+                                kind == 0 ? "lattice" : "uniform",
+                                kind == 0 ? "Synthetic lattice"
+                                          : "Uniform noise");
+        for (int i = 0; i < 120; i++) {
+            double v;
+
+            if (kind == 0) {
+                /* values on a 15 kHz lattice with tiny measurement noise,
+                 * stored in shuffled order so the (optional) warm-up drift
+                 * model does not mistake the lattice ramp for device drift */
+                unsigned long h = (unsigned long)i * 2654435761ul;
+                int j = (int)((unsigned long)i * 37ul % 120ul);
+
+                v = 1.0e9 + 15000.0 * (double)j +
+                    30.0 * ((double)(h % 1000) / 1000.0 - 0.5);
+            } else {
+                /* deterministic pseudo-uniform values in the same band */
+                unsigned long h = (unsigned long)i * 40503ul + 17ul;
+
+                v = 1.0e9 + 1.8e6 * ((double)(h % 1000) / 1000.0);
+            }
+            pos += (size_t)snprintf(json + pos, sizeof(json) - pos,
+                                    "%s%.2f", i > 0 ? ", " : "", v);
+        }
+        snprintf(json + pos, sizeof(json) - pos,
+                 "] } ] } ] } ], \"unassigned_measurements\": [] }\n");
+        f = fopen(path, "w");
+        CHECK(f != NULL);
+        if (f == NULL) continue;
+        fputs(json, f);
+        fclose(f);
+
+        fcd_list_init(&list);
+        CHECK(fcd_load_file(&list, path, err, sizeof(err)));
+        run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, NULL, NULL, err,
+                         sizeof(err));
+        CHECK(run != NULL);
+        if (run != NULL) {
+            FclTable *ht = NULL;
+
+            hyp = dagcore_find(run, "hypothesis");
+            CHECK(hyp != (size_t)-1);
+            if (hyp != (size_t)-1) {
+                CHECK(run->nodes[hyp].status == DAGCORE_DONE);
+                ht = (FclTable *)run->nodes[hyp].payload;
+            }
+            CHECK(ht != NULL);
+            if (ht != NULL) {
+                CHECK(ht->title != NULL &&
+                      strstr(ht->title, "Source test") != NULL);
+                CHECK(ht->notes != NULL &&
+                      strstr(ht->notes, "Alpha: 0.05") != NULL);
+                CHECK(ht->notes != NULL &&
+                      strstr(ht->notes, "Verdict:") != NULL);
+                if (kind == 0) {
+                    printf("  lattice verdict: supported\n");
+                    CHECK(strstr(ht->notes, "Best-supported spacing") !=
+                          NULL);
+                    CHECK(strstr(ht->notes, "support") != NULL);
+                } else {
+                    printf("  uniform verdict: cannot conclude\n");
+                    CHECK(strstr(ht->notes, "Cannot conclude") != NULL);
+                }
+            }
+            fc_dag_free(run);
+        }
+        fcd_list_clear(&list);
+        remove(path);
+    }
 }
 
 static void test_lte_hint(void)
@@ -6041,6 +6185,7 @@ int main(void)
     test_fclk();
     test_fcdataset();
     test_fcdag();
+    test_fc_hypothesis();
     test_rank_canonical();
     test_synth_matches();
     test_lte_hint();

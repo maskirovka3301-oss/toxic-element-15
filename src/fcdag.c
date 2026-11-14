@@ -177,7 +177,9 @@ const DagCoreNodeSpec fc_node_specs[] = {
       "model-select" },
     { "evidence-filter", "Evidence screen and synthesis input", "summary" },
     { "synthesis", "Synthesis of the most likely subcarrier spacings",
-      "evidence-filter" }
+      "evidence-filter" },
+    { "hypothesis", "Source test: subcarrier lattice vs chance (combined)",
+      "blocks" }
 };
 const size_t fc_node_count = sizeof(fc_node_specs) / sizeof(fc_node_specs[0]);
 
@@ -192,7 +194,8 @@ static const char *const fc_exec_ids[] = {
     "blocks", "drift-correction", "rayleigh", "vtest", "pdm",
     "periodogram", "chisq", "kde", "cluster", "multimodal", "correction",
     "summary", "induced-scan", "k-dispersion", "cf-slope", "mixture-fit",
-    "model-select", "k-summary", "evidence-filter", "synthesis"
+    "model-select", "k-summary", "evidence-filter", "synthesis",
+    "hypothesis"
 };
 
 static bool fc_has_executor(const char *id)
@@ -1738,6 +1741,498 @@ static FclTable *analysis_synthesis(FcCtx *c)
 }
 
 /* ------------------------------------------------------------------ */
+/* node: hypothesis (combined source test)                            */
+/* ------------------------------------------------------------------ */
+
+/* Permutation replicates of the combined source test. 999 with the
+ * (count+1)/(reps+1) correction keeps the permutation p-value valid
+ * (Phipson & Smyth 2010) while resolving the tail reasonably. */
+#define FC_HYP_REPS 999
+
+/* von Mises concentration from the mean resultant length (Fisher, 1993,
+ * "Statistical Analysis of Circular Data", section 4.5.5 approximation). */
+static double vm_kappa(double R)
+{
+    if (R < 1e-6) return 0.0;
+    if (R < 0.53) return 2.0 * R + R * R * R + 5.0 * pow(R, 5) / 6.0;
+    if (R < 0.85) return -0.4 + 1.39 * R + 0.43 / (1.0 - R);
+    if (R > 0.999) return 1e6;
+    return 1.0 / (R * R * R - 4.0 * R * R + 3.0 * R);
+}
+
+/* Max over the candidate spacings of the Rayleigh statistic n*R^2 for one
+ * value set: the Westfall-Young max statistic, so the p-value accounts for
+ * having scanned several candidate spacings (the winner is chosen by the
+ * data). */
+static double max_lattice_z(const double *v, size_t n, const double *cands,
+                            size_t n_cand)
+{
+    double best = 0.0;
+
+    for (size_t i = 0; i < n_cand; i++) {
+        double mean_angle = 0.0, R = 0.0;
+        double z;
+
+        fcl_circular_stats(v, n, 0.0, cands[i], &mean_angle, &R);
+        z = (double)n * R * R;
+        if (z > best) best = z;
+    }
+    return best;
+}
+
+/* The source hypothesis test: using the analysis results that survived the
+ * evidence screen, decide whether the measurements are better explained by
+ * one or more subcarriers with a common spacing than by no lattice at all.
+ *
+ * For every block the spacing with the strongest retained evidence is
+ * tested directly on the (drift corrected) measurements with a
+ * Rayleigh/von Mises isotropy test; the p-value uses the Westfall-Young max
+ * statistic over all candidate spacings, so the multiplicity of the spacing
+ * scan is controlled. The per-block permutation p-values are combined
+ * across independent blocks with Fisher's method (chi2 = -2 sum ln p,
+ * df = 2m). K (the number of averaged subcarriers) comes from the
+ * mixture/BIC chain. The verdict is affirmative only when the combined p is
+ * below alpha, more than one independent test family supports the retained
+ * spacing, and enough measurements are available; otherwise the table says
+ * that the data cannot conclude. */
+static FclTable *analysis_hypothesis(FcCtx *c)
+{
+    static const char *cols[] = { "Block", "n", "spacing (kHz)", "R",
+                                  "kappa", "PDM", "max z", "p (perm)",
+                                  "BH q" };
+    FclTable *t = fcl_table_new(
+        "Source test: subcarrier lattice vs chance (combined)", cols, 9);
+    size_t m = 0;
+    size_t total_n = 0;
+    size_t total_families = 0;
+    double top_spacing = 0.0;
+    int top_K = 1;
+    double chi2_sum = 0.0;
+    double p_comb = 1.0;
+    char verdict[640];
+    bool consistent = false;
+    bool enough_data = false;
+    size_t n_blocks = 0;
+    double *p_raw = NULL;
+    double *R_sel = NULL;
+    double *df_sel = NULL;
+    size_t *n_sel = NULL;
+    double *kappa_sel = NULL;
+    double *pdm_sel = NULL;
+    double *maxz_sel = NULL;
+    int *K_sel = NULL;
+    size_t *fam_sel = NULL;
+
+    if (t == NULL) return NULL;
+    if (c->n_blocks == 0) {
+        fcl_table_note(t, "No measurement blocks are loaded.");
+        return t;
+    }
+    n_blocks = c->n_blocks;
+    p_raw = calloc(n_blocks, sizeof(*p_raw));
+    R_sel = calloc(n_blocks, sizeof(*R_sel));
+    df_sel = calloc(n_blocks, sizeof(*df_sel));
+    n_sel = calloc(n_blocks, sizeof(*n_sel));
+    kappa_sel = calloc(n_blocks, sizeof(*kappa_sel));
+    pdm_sel = calloc(n_blocks, sizeof(*pdm_sel));
+    maxz_sel = calloc(n_blocks, sizeof(*maxz_sel));
+    K_sel = calloc(n_blocks, sizeof(*K_sel));
+    fam_sel = calloc(n_blocks, sizeof(*fam_sel));
+    if (p_raw == NULL || R_sel == NULL || df_sel == NULL ||
+        n_sel == NULL || kappa_sel == NULL || pdm_sel == NULL ||
+        maxz_sel == NULL || K_sel == NULL || fam_sel == NULL) {
+        goto out;
+    }
+
+    for (size_t b = 0; b < n_blocks; b++) {
+        static const char *const fam_ids[] = {
+            "rayleigh", "vtest", "pdm", "chisq", "kde",
+            "induced-K", "mixture-BIC", "cf-slope"
+        };
+        const size_t n_fam = sizeof(fam_ids) / sizeof(fam_ids[0]);
+        const double *values = block_values(c, b);
+        size_t n = c->blocks[b].n;
+        double cands[24];
+        size_t n_cand = 0;
+        double score = -1.0;
+        bool have[8] = { false };
+        size_t families = 0;
+        double min_hz = block_min(c, b);
+        double max_hz = block_max(c, b);
+        double mean_angle = 0.0, R = 0.0;
+        double obs_max_z;
+        size_t hits = 0;
+        FclRng rng;
+        double *perm;
+
+        if (values == NULL || n < 4) continue;
+        /* the spacing that received the strongest retained evidence */
+        for (size_t i = 0; i < c->n_evidence; i++) {
+            double log_ev;
+
+            if (c->evidence[i].block != b || !c->evidence[i].retained) {
+                continue;
+            }
+            log_ev = -log10(fmax(1e-300, c->evidence[i].p)) *
+                     c->evidence[i].weight;
+            if (log_ev > 20.0) log_ev = 20.0;
+            if (df_sel[b] <= 0.0) {
+                df_sel[b] = c->evidence[i].spacing_hz;
+                score = log_ev;
+            } else if (fabs(c->evidence[i].spacing_hz - df_sel[b]) < 1.0) {
+                score += log_ev;
+            } else if (log_ev > score) {
+                df_sel[b] = c->evidence[i].spacing_hz;
+                score = log_ev;
+            }
+        }
+        if (df_sel[b] <= 0.0) {
+            if (c->best_df != NULL && c->best_df[b] > 0.0) {
+                df_sel[b] = c->best_df[b];
+            } else {
+                continue;
+            }
+        }
+        for (size_t i = 0; i < c->n_evidence; i++) {
+            if (c->evidence[i].block != b || !c->evidence[i].retained) {
+                continue;
+            }
+            if (fabs(c->evidence[i].spacing_hz - df_sel[b]) >= 1.0) {
+                continue;
+            }
+            for (size_t f = 0; f < n_fam; f++) {
+                if (strcmp(c->evidence[i].family, fam_ids[f]) == 0) {
+                    have[f] = true;
+                }
+            }
+        }
+        for (size_t f = 0; f < n_fam; f++) {
+            if (have[f]) families++;
+        }
+        /* Candidate spacings: the numerology grid plus every retained
+         * spacing of this block. Only spacings that complete at least two
+         * lattice cycles inside the block span are eligible: a narrow band
+         * folded at a much larger spacing is trivially concentrated, which
+         * would make the max statistic meaningless (and is why the
+         * permutation null is folded over the same span). */
+        {
+            double span_hz = max_hz - min_hz;
+
+            for (size_t s = 0; s < fcl_n_spacings && n_cand < 24; s++) {
+                if (span_hz >= 2.0 * fcl_spacings_hz[s]) {
+                    cands[n_cand++] = fcl_spacings_hz[s];
+                }
+            }
+            for (size_t i = 0; i < c->n_evidence && n_cand < 24; i++) {
+                bool seen = false;
+
+                if (c->evidence[i].block != b ||
+                    !c->evidence[i].retained) {
+                    continue;
+                }
+                if (span_hz < 2.0 * c->evidence[i].spacing_hz) {
+                    continue;
+                }
+                for (size_t s = 0; s < n_cand; s++) {
+                    if (fabs(cands[s] - c->evidence[i].spacing_hz) < 1.0) {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (!seen) cands[n_cand++] = c->evidence[i].spacing_hz;
+            }
+        }
+        if (n_cand == 0) {
+            /* no spacing completes two cycles: the block is too narrow to
+             * test any lattice */
+            df_sel[b] = 0.0;
+            continue;
+        }
+        /* the selected spacing must itself be eligible; when it is not,
+         * test the best eligible candidate instead */
+        {
+            bool seen = false;
+
+            for (size_t s = 0; s < n_cand; s++) {
+                if (fabs(cands[s] - df_sel[b]) < 1.0) seen = true;
+            }
+            if (!seen) {
+                /* pick the eligible candidate with the strongest retained
+                 * evidence for this block */
+                double best_score = -1.0;
+                double best_df = cands[0];
+
+                for (size_t i = 0; i < c->n_evidence; i++) {
+                    double log_ev;
+
+                    if (c->evidence[i].block != b ||
+                        !c->evidence[i].retained) {
+                        continue;
+                    }
+                    for (size_t s = 0; s < n_cand; s++) {
+                        if (fabs(cands[s] - c->evidence[i].spacing_hz) >=
+                            1.0) {
+                            continue;
+                        }
+                        log_ev = -log10(fmax(1e-300, c->evidence[i].p)) *
+                                 c->evidence[i].weight;
+                        if (log_ev > 20.0) log_ev = 20.0;
+                        if (log_ev > best_score) {
+                            best_score = log_ev;
+                            best_df = cands[s];
+                        }
+                    }
+                }
+                df_sel[b] = best_df;
+            }
+        }
+
+        fcl_circular_stats(values, n, 0.0, df_sel[b], &mean_angle, &R);
+        obs_max_z = max_lattice_z(values, n, cands, n_cand);
+
+        perm = malloc(n * sizeof(*perm));
+        if (perm == NULL) continue;
+        fcl_rng_seed(&rng, 0x9E3779B97F4A7C15ULL ^
+                            (unsigned long long)b);
+        for (size_t r = 0; r < FC_HYP_REPS; r++) {
+            double z;
+
+            for (size_t i = 0; i < n; i++) {
+                perm[i] = min_hz + (max_hz - min_hz) *
+                                       fcl_rng_uniform(&rng);
+            }
+            z = max_lattice_z(perm, n, cands, n_cand);
+            if (z >= obs_max_z) hits++;
+        }
+        free(perm);
+
+        p_raw[b] = ((double)hits + 1.0) / ((double)FC_HYP_REPS + 1.0);
+        R_sel[b] = R;
+        n_sel[b] = n;
+        maxz_sel[b] = obs_max_z;
+        kappa_sel[b] = vm_kappa(R);
+        pdm_sel[b] = fcl_pdm(values, n, 0.0, df_sel[b], 16);
+        K_sel[b] = (c->k_final != NULL && c->k_final[b] > 0)
+                       ? c->k_final[b] : 1;
+        fam_sel[b] = families;
+        total_n += n;
+        total_families += families;
+        m++;
+        if (top_spacing <= 0.0) {
+            top_spacing = df_sel[b];
+            top_K = K_sel[b];
+        }
+    }
+    /* the overall best-supported spacing: the retained evidence summed over
+     * all blocks (the same weighting the synthesis node uses) */
+    {
+        double spacings[24];
+        double scores[24];
+        size_t n_sp = 0;
+        int best_K = 1;
+
+        for (size_t i = 0; i < c->n_evidence; i++) {
+            bool seen = false;
+
+            if (!c->evidence[i].retained) continue;
+            for (size_t s = 0; s < n_sp; s++) {
+                if (fabs(spacings[s] - c->evidence[i].spacing_hz) < 1.0) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen && n_sp < 24) {
+                spacings[n_sp] = c->evidence[i].spacing_hz;
+                scores[n_sp] = 0.0;
+                n_sp++;
+            }
+        }
+        for (size_t s = 0; s < n_sp; s++) {
+            for (size_t i = 0; i < c->n_evidence; i++) {
+                double log_ev;
+
+                if (!c->evidence[i].retained) continue;
+                if (fabs(c->evidence[i].spacing_hz - spacings[s]) >= 1.0) {
+                    continue;
+                }
+                log_ev = -log10(fmax(1e-300, c->evidence[i].p)) *
+                         c->evidence[i].weight;
+                if (log_ev > 20.0) log_ev = 20.0;
+                scores[s] += log_ev;
+                if (c->evidence[i].K > best_K &&
+                    strcmp(c->evidence[i].family, "mixture-BIC") == 0) {
+                    /* noted below once the winner is known */
+                }
+            }
+        }
+        if (n_sp > 0) {
+            size_t best = 0;
+
+            for (size_t s = 1; s < n_sp; s++) {
+                if (scores[s] > scores[best]) best = s;
+            }
+            top_spacing = spacings[best];
+            /* implied K from the mixture evidence for the winning spacing,
+             * or from the K chain of a block that selected it */
+            top_K = 1;
+            for (size_t i = 0; i < c->n_evidence; i++) {
+                if (!c->evidence[i].retained ||
+                    strcmp(c->evidence[i].family, "mixture-BIC") != 0) {
+                    continue;
+                }
+                if (fabs(c->evidence[i].spacing_hz - top_spacing) < 1.0 &&
+                    c->evidence[i].K > top_K) {
+                    top_K = c->evidence[i].K;
+                }
+            }
+            if (top_K <= 1 && c->k_final != NULL) {
+                for (size_t i = 0; i < n_blocks; i++) {
+                    if (n_sel[i] > 0 &&
+                        fabs(df_sel[i] - top_spacing) < 1.0 &&
+                        c->k_final[i] > top_K) {
+                        top_K = c->k_final[i];
+                    }
+                }
+            }
+        }
+    }
+
+    if (m == 0) {
+        fcl_table_note(t, "No block retained evidence that can be tested "
+                          "directly; the data cannot support a conclusion.");
+        goto out;
+    }
+
+    /* Fisher's method over the independent blocks */
+    for (size_t i = 0; i < n_blocks; i++) {
+        if (n_sel[i] > 0 && p_raw[i] > 0.0 && p_raw[i] <= 1.0) {
+            chi2_sum += -2.0 * log(p_raw[i]);
+        }
+    }
+    p_comb = fcl_chi2_p(chi2_sum, 2 * m);
+
+    /* per-block rows, with the BH adjustment of the permutation p-values */
+    {
+        double *adj = malloc(m * sizeof(*adj));
+        size_t k = 0;
+        size_t used = 0;
+
+        if (adj != NULL) {
+            for (size_t i = 0; i < n_blocks; i++) {
+                if (n_sel[i] > 0) adj[used++] = p_raw[i];
+            }
+            if (used > 0) fcl_bh_adjust(adj, used, FC_ALPHA);
+        }
+        for (size_t i = 0; i < n_blocks; i++) {
+            char cells[9][128];
+            char qbuf[32];
+
+            if (n_sel[i] == 0) continue;
+            snprintf(qbuf, sizeof(qbuf), "%.3g",
+                     adj != NULL ? adj[k] : p_raw[i]);
+            k++;
+            snprintf(cells[0], sizeof(cells[0]), "%s",
+                     c->blocks[i].label);
+            snprintf(cells[1], sizeof(cells[1]), "%zu", n_sel[i]);
+            snprintf(cells[2], sizeof(cells[2]), "%.1f",
+                     df_sel[i] / 1e3);
+            snprintf(cells[3], sizeof(cells[3]), "%.3f", R_sel[i]);
+            snprintf(cells[4], sizeof(cells[4]), "%.2f", kappa_sel[i]);
+            snprintf(cells[5], sizeof(cells[5]), "%.3f", pdm_sel[i]);
+            snprintf(cells[6], sizeof(cells[6]), "%.2f", maxz_sel[i]);
+            snprintf(cells[7], sizeof(cells[7]), "%.4g", p_raw[i]);
+            snprintf(cells[8], sizeof(cells[8]), "%s", qbuf);
+            fc_add_cells(t, cells, 9);
+        }
+        free(adj);
+    }
+    {
+        char cells[9][128];
+
+        snprintf(cells[0], sizeof(cells[0]), "COMBINED");
+        snprintf(cells[1], sizeof(cells[1]), "%zu", total_n);
+        snprintf(cells[2], sizeof(cells[2]), "%.1f", top_spacing / 1e3);
+        snprintf(cells[3], sizeof(cells[3]), "-");
+        snprintf(cells[4], sizeof(cells[4]), "-");
+        snprintf(cells[5], sizeof(cells[5]), "-");
+        snprintf(cells[6], sizeof(cells[6]), "chi2 %.3f", chi2_sum);
+        snprintf(cells[7], sizeof(cells[7]), "%.4g", p_comb);
+        snprintf(cells[8], sizeof(cells[8]), "df %zu", 2 * m);
+        fc_add_cells(t, cells, 9);
+    }
+
+    consistent = total_families >= 2 && m >= 1;
+    enough_data = total_n >= 12;
+    if (p_comb < FC_ALPHA && consistent && enough_data) {
+        if (top_K > 1) {
+            snprintf(verdict, sizeof(verdict),
+                     "The data support one or more subcarriers with a "
+                     "spacing of %.3g kHz: the measurements are consistent "
+                     "with equal-weight averages of K = %d latent "
+                     "subcarriers on that lattice (combined p = %.3g < "
+                     "alpha %.2f; %zu test families; %zu measurements).",
+                     top_spacing / 1e3, top_K, p_comb, FC_ALPHA,
+                     total_families, total_n);
+        } else {
+            snprintf(verdict, sizeof(verdict),
+                     "The data support a subcarrier lattice with a "
+                     "spacing of %.3g kHz (single subcarrier, K = 1): "
+                     "combined p = %.3g < alpha %.2f; %zu test families; "
+                     "%zu measurements.", top_spacing / 1e3, p_comb,
+                     FC_ALPHA, total_families, total_n);
+        }
+    } else if (!enough_data) {
+        snprintf(verdict, sizeof(verdict),
+                 "Cannot conclude: too few measurements survived the "
+                 "evidence screen (%zu measurements; at least 12 needed).",
+                 total_n);
+    } else if (p_comb >= FC_ALPHA) {
+        snprintf(verdict, sizeof(verdict),
+                 "Cannot conclude that the source is better explained by "
+                 "one or more subcarriers with a common spacing: the "
+                 "combined isotropy test gives p = %.3g (alpha %.2f).",
+                 p_comb, FC_ALPHA);
+    } else {
+        snprintf(verdict, sizeof(verdict),
+                 "Cannot conclude: the spacing evidence is not consistent "
+                 "across independent test families (combined p = %.3g, "
+                 "alpha %.2f).", p_comb, FC_ALPHA);
+    }
+    fcl_table_note(t, "Alpha: %.2f; per-block p-values use the "
+                      "Westfall-Young max statistic over all candidate "
+                      "spacings (999 permutations, +1 correction); blocks "
+                      "are combined with Fisher's method (chi2 = -2 sum "
+                      "ln p, df = 2m).", FC_ALPHA);
+    fcl_table_note(t, "Blocks tested: %zu; measurements: %zu; independent "
+                      "test families supporting the retained spacing: %zu.",
+                   m, total_n, total_families);
+    fcl_table_note(t, "Best-supported spacing: %.3g kHz; implied K: %d.",
+                   top_spacing / 1e3, top_K);
+    fcl_table_note(t, "Combined Fisher test: chi2 = %.3f, df = %zu, "
+                      "p = %.4g.", chi2_sum, 2 * m, p_comb);
+    fcl_table_note(t, "Verdict: %s", verdict);
+    fcl_table_note(t, "Caveats: blocks are treated as independent samples "
+                      "of the same device, and a common lattice offset is "
+                      "not identifiable from frequencies alone; the "
+                      "retained analyses' own p-values are not re-used in "
+                      "the combination (a direct per-block isotropy test "
+                      "is), so dependent family evidence is summarised but "
+                      "not double-counted.");
+
+out:
+    free(p_raw);
+    free(R_sel);
+    free(df_sel);
+    free(n_sel);
+    free(kappa_sel);
+    free(pdm_sel);
+    free(maxz_sel);
+    free(K_sel);
+    free(fam_sel);
+    return t;
+}
+
+/* ------------------------------------------------------------------ */
 /* executor dispatch                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -1794,6 +2289,7 @@ static bool fc_execute(void *ctx, DagCoreNode *node, char *err, size_t err_len)
         table = analysis_evidence_filter(c);
     }
     else if (strcmp(id, "synthesis") == 0) table = analysis_synthesis(c);
+    else if (strcmp(id, "hypothesis") == 0) table = analysis_hypothesis(c);
     if (table == NULL) return false;
     node->payload = table;
     return true;
