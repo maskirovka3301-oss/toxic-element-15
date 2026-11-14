@@ -221,6 +221,11 @@ induced-lattice clustering was detected, the CF slope when the K=1
 residual dispersion cannot serve as a single-subcarrier reference, and the
 MDL node always (no signal data).
 
+Transient notices shown in the bottom-right status label of the Spectrum
+toolbar (saved reports, selection warnings, buffer summaries, ...) expire
+after 5 seconds; while a notice is live it takes precedence over the
+routine filename/progress status, which returns when the notice expires.
+
 The Frequency Counter **Settings** tab also lists every DAG analysis with a
 checkbox (all checked by default; Check all / Uncheck all shortcuts): the
 selection is applied to the next Analyze run, disabled nodes are recorded

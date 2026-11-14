@@ -55,6 +55,9 @@
 #define SCROLL_SECONDS          1.0
 #define DEFAULT_VISIBLE_SECONDS 1.0
 #define UI_TIMER_MS            50
+/* transient notices in the bottom-right status label disappear after this
+ * many seconds (the routine filename/progress status then returns) */
+#define INFO_MESSAGE_TIMEOUT_S 5
 #define DEFAULT_DB_MIN       -100.0
 #define DEFAULT_DB_MAX        -20.0
 
@@ -3669,6 +3672,9 @@ static void set_info(Ui *ui, const char *fmt, ...)
 
         gtk_label_set_text(GTK_LABEL(ui->info_label), safe);
         g_free(safe);
+        ui->info_expiry_us =
+            g_get_monotonic_time() + (gint64)INFO_MESSAGE_TIMEOUT_S *
+                                         G_USEC_PER_SEC;
     }
 }
 
@@ -4912,10 +4918,23 @@ static void update_sel_bw_label(Ui *ui)
     gtk_label_set_text(GTK_LABEL(ui->sel_bw_label), text);
 }
 
+/* Expire a transient bottom-right message; returns true when the message
+ * is still live (the routine status must then wait). */
+static bool info_message_active(Ui *ui)
+{
+    if (ui->info_expiry_us == 0) return false;
+    if (g_get_monotonic_time() < ui->info_expiry_us) return true;
+    ui->info_expiry_us = 0;
+    gtk_label_set_text(GTK_LABEL(ui->info_label), "");
+    return false;
+}
+
 static void update_info_label(Ui *ui)
 {
     char text[LABEL_BUFFER_SIZE];
 
+    if (ui->info_label == NULL) return;
+    if (info_message_active(ui)) return;   /* transient notice takes over */
     if (ui->last_progress >= 0) {
         snprintf(text, sizeof(text), INFO_PROGRESS_FMT, ui->last_progress);
     } else {
@@ -4932,6 +4951,12 @@ static gboolean on_timer(gpointer user_data)
 {
     Ui *ui = (Ui *)user_data;
     int progress = wc_progress(ui->cache);
+
+    /* a transient bottom-right message expires after 5 seconds and the
+     * routine status (filename/progress) comes back */
+    if (ui->info_expiry_us != 0 && !info_message_active(ui)) {
+        update_info_label(ui);
+    }
 
     /* poll the async Analyze job (READ ONLY — the idle
      * callbacks own the cleanup) */

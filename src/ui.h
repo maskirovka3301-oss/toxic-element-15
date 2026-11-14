@@ -353,7 +353,8 @@ typedef struct Ui {
      * waterfall with the same in-widget tag style as the frequency readout */
     guint      hover_timeout;   /* 1 s stationary delay                  */
     bool       hover_hint_visible;
-    GtkWidget *info_label;   /* bottom-left: filename when loaded */
+    GtkWidget *info_label;   /* bottom-right: filename / transient notice */
+    gint64     info_expiry_us;   /* transient message deadline (0 = none) */
     GtkWidget *range_label;  /* bottom-right: visible time span and
                               * first/last sample index           */
     GtkWidget *sel_bw_label;   /* "selected bandwidth: ..." in the toolbar */
