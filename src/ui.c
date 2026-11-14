@@ -4002,7 +4002,7 @@ static void on_open_menu(GtkMenuItem *item, gpointer user_data)
 /* --- About screen ------------------------------------------------------- */
 
 #define ABOUT_TITLE   "Toxic Element 15"
-#define ABOUT_TAGLINE "RF Weapon Signals Intelligence"
+#define ABOUT_TAGLINE "RF Signals Intelligence"
 #define ABOUT_AUTHOR  "Daniel R. Azulay | Radio Defense"
 #define ABOUT_YEAR    "2026"
 #define ABOUT_WINDOW_W 900
