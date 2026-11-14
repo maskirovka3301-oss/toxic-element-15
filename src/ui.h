@@ -100,6 +100,8 @@ typedef struct Ui {
 
     /* --- navigation & playback --- */
     bool    playing;         /* waterfall playback running (loops) */
+    bool    playhead_valid;  /* the playback position is known          */
+    double  playhead_time;   /* stream time of the playback position    */
     GtkWidget *play_btn;     /* Play/Pause toggle in the control bar */
     int64_t last_play_tick;  /* g_get_monotonic_time of last advance */
     double drag_pan_x, drag_pan_y; /* waterfall pan-drag anchor */
@@ -361,10 +363,14 @@ typedef struct Ui {
     guint      hover_timeout;   /* 1 s stationary delay                  */
     bool       hover_hint_visible;
     GtkWidget *info_label;   /* bottom-right: filename / transient notice */
+    /* committed (released) dynamic range: raw dB values are normalised
+     * through it when the waterfall looks up the viridis colour scheme */
+    double     wf_range_lo, wf_range_hi;
     gint64     info_expiry_us;   /* transient message deadline (0 = none) */
     GtkWidget *range_label;  /* bottom-right: visible time span and
                               * first/last sample index           */
     GtkWidget *sel_bw_label;   /* "selected bandwidth: ..." in the toolbar */
+    GtkWidget *zoom_bw_label;  /* "zoomed bandwidth: ..." below it (peak view) */
     /* cursor frequency read-out at the top of the waterfall */
     bool   cursor_active;
     double cursor_x;

@@ -390,8 +390,37 @@ static void add_disabled_note(Str *out, ListStyle style, const FcRun *run)
     str_add(out, style == LIST_HTML ? ".</em></p>\n" : ".\n");
 }
 
+/* True when the drift-correction node ran and corrected at least one block
+ * (its table notes state that); reported before the analysis tables so the
+ * reader knows the analyses below used corrected measurements. */
+static bool drift_correction_applied(const FcRun *run)
+{
+    if (run == NULL) return false;
+    for (size_t i = 0; i < run->count; i++) {
+        if (run->nodes[i].spec != NULL && run->nodes[i].spec->id != NULL &&
+            strcmp(run->nodes[i].spec->id, "drift-correction") == 0) {
+            return run->nodes[i].status == DAGCORE_DONE;
+        }
+    }
+    return false;
+}
+
 static void render_analyses(Str *out, ListStyle style, const FcRun *run)
 {
+    if (drift_correction_applied(run)) {
+        if (style == LIST_HTML) {
+            str_add(out, "<p><em>Drift correction: the device warm-up drift "
+                         "model was applied to the measurements before the "
+                         "analyses below.</em></p>\n");
+        } else if (style == LIST_MD) {
+            str_add(out, "\n*Drift correction: the device warm-up drift "
+                         "model was applied to the measurements before the "
+                         "analyses below.*\n\n");
+        } else {
+            str_add(out, "Note: device warm-up drift correction was applied "
+                         "to the measurements before the analyses below.\n\n");
+        }
+    }
     if (run == NULL || run->count == 0) {
         if (style == LIST_TEXT) str_add(out, "  (the DAG did not run)\n");
         return;

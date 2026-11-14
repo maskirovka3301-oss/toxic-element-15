@@ -55,6 +55,11 @@
 #define SCROLL_SECONDS          1.0
 #define DEFAULT_VISIBLE_SECONDS 1.0
 #define UI_TIMER_MS            50
+/* waterfall playback-position line */
+#define PLAYHEAD_R             1.0
+#define PLAYHEAD_G             0.15
+#define PLAYHEAD_B             0.12
+#define PLAYHEAD_WIDTH         2.0
 /* transient notices in the bottom-right status label disappear after this
  * many seconds (the routine filename/progress status then returns) */
 #define INFO_MESSAGE_TIMEOUT_S 5
@@ -104,6 +109,11 @@
 #define FONT_SIZE_LOADING 18.0
 #define FONT_SIZE_NO_DATA 16.0
 #define DB_RANGE_MIN_SPAN 1.0
+/* absolute dB domain of the waterfall colour scheme (one LUT entry per
+ * 1/255 of this span); the dB sliders select which window of it maps to the
+ * full viridis gradient inside an in-memory copy of the scheme */
+#define WF_LUT_DB_MIN (-180.0)
+#define WF_LUT_DB_MAX   20.0
 #define HZ_PER_KHZ        1e3
 #define HZ_PER_MHZ        1e6
 #define SEL_FILL_R        1.0
@@ -165,6 +175,9 @@
 #define USEC_PER_SEC           1e6
 #define FULL_ZOOM_EPSILON      1.0
 #define PEAK_UPDATE_INTERVAL_US 200000
+/* pixel rows averaged into the peak strip (it shows the mean spectrum of
+ * the visible waterfall rows, from the render buffer) */
+#define PEAK_MEAN_ROWS 128
 
 /* peak pane (spectrum strip between waterfall and toolbar) */
 #define PEAK_PANE_HEIGHT 150
@@ -174,6 +187,14 @@
 #define PEAK_HANDLE_GRAB 5.0
 #define PEAK_HANDLE_WIDTH 4.0
 #define PEAK_NO_DATA     "no spectrum"
+/* left dB axis of the peak strip: tick labels are computed from the allowed
+ * dB range (the same DB_SCALE_MIN..DB_SCALE_MAX the sliders use) */
+#define PEAK_DB_AXIS_W   42
+#define PEAK_DB_TICK_LEN 4.0
+#define PEAK_SHADE_R     0.16
+#define PEAK_SHADE_G     0.38
+#define PEAK_SHADE_B     0.95
+#define PEAK_SHADE_A     0.5
 #define PEAK_FILL_R      0.2
 #define PEAK_FILL_G      0.7
 #define PEAK_FILL_B      0.3
@@ -546,6 +567,8 @@ static bool selection_contains_px(Ui *ui, double x, double y, int w, int h);
 static void wrap_scroll(Ui *ui);
 static size_t wf_zero_row_frames(const Ui *ui, int h);
 static double wf_stream_period_time(const Ui *ui);
+static void update_playhead(Ui *ui);
+static void draw_playhead(Ui *ui, cairo_t *cr, int w, int h);
 static void toggle_full_height_selection(Ui *ui);
 static void clear_selection_state(Ui *ui);
 static void set_info(Ui *ui, const char *fmt, ...);
@@ -3708,21 +3731,47 @@ static gboolean on_key_press(GtkWidget *widget, GdkEventKey *event, gpointer use
     return FALSE;
 }
 
-/* Recolour the whole waterfall from the render buffer (the dB mapping is
- * applied mathematically to every visible row). Used when the dynamic range
- * changes, so the surface is re-mapped immediately. */
-static void wf_recolour_from_sliders(Ui *ui)
+/* Map one raw dB value to a viridis colour through the committed dynamic
+ * range: the colour scheme is used as-is, and the render buffer values are
+ * never modified — the range normalisation happens here, per pixel. */
+static Rgb8 wf_db_colour(const Ui *ui, float db)
 {
-    int w = ui->drawing != NULL ? gtk_widget_get_allocated_width(ui->drawing)
-                                : 0;
-    int h = ui->drawing != NULL ? gtk_widget_get_allocated_height(ui->drawing)
-                                : 0;
+    float lo = (float)ui->wf_range_lo;
+    float hi = (float)ui->wf_range_hi;
+    float span = hi - lo;
 
-    if (w <= 0 || h <= 0) {
-        gtk_widget_queue_draw(ui->drawing);
+    if (span < (float)DB_RANGE_MIN_SPAN) span = (float)DB_RANGE_MIN_SPAN;
+    return viridis_lookup(&ui->colormap, (db - lo) / span);
+}
+
+/* Commit the slider window as the waterfall dynamic range and repaint.
+ * Called only when a slider is released, so dragging does not change the
+ * waterfall until the user lets go (the peak shading tracks live). */
+static void apply_db_range(Ui *ui)
+{
+    double lo, hi;
+
+    if (ui == NULL || ui->auto_scale) return;   /* auto manages the window */
+    lo = MIN(ui->db_min, ui->db_max);
+    hi = MAX(ui->db_min, ui->db_max);
+    if (hi - lo < DB_RANGE_MIN_SPAN) hi = lo + DB_RANGE_MIN_SPAN;
+    if (fabs(lo - ui->wf_range_lo) < 1e-9 &&
+        fabs(hi - ui->wf_range_hi) < 1e-9) {
         return;
     }
-    wf_update_from_renderbuf(ui, w, h);
+    ui->wf_range_lo = lo;
+    ui->wf_range_hi = hi;
+    ui->wf_valid = false;   /* full repaint with the committed range */
+    gtk_widget_queue_draw(ui->drawing);
+}
+
+static gboolean on_db_range_released(GtkWidget *widget, GdkEvent *event,
+                                     gpointer user_data)
+{
+    (void)widget;
+    (void)event;
+    apply_db_range((Ui *)user_data);
+    return FALSE;
 }
 
 /* Move the other dB slider so the dynamic-range span is preserved (only
@@ -3764,9 +3813,15 @@ static void on_db_min_changed(GtkRange *range, gpointer user_data)
     } else {
         ui->db_min = value;      /* independent: no effect on db_max */
     }
+    if (ui->db_min < DB_SCALE_MIN) ui->db_min = DB_SCALE_MIN;
+    if (ui->db_min > DB_SCALE_MAX) ui->db_min = DB_SCALE_MAX;
     ui->auto_scale = false;
+    /* the peak view's out-of-range shading tracks the sliders live; the
+     * waterfall colour scheme still applies only on release */
+    gtk_widget_queue_draw(ui->peak_pane);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->auto_check), FALSE);
-    wf_recolour_from_sliders(ui);
+    /* not committed yet: the waterfall keeps the old colour scheme until
+     * the slider is released (db_range_committed) */
 }
 
 static void on_db_max_changed(GtkRange *range, gpointer user_data)
@@ -3791,9 +3846,11 @@ static void on_db_max_changed(GtkRange *range, gpointer user_data)
     } else {
         ui->db_max = value;      /* independent: no effect on db_min */
     }
+    if (ui->db_max < DB_SCALE_MIN) ui->db_max = DB_SCALE_MIN;
+    if (ui->db_max > DB_SCALE_MAX) ui->db_max = DB_SCALE_MAX;
     ui->auto_scale = false;
+    gtk_widget_queue_draw(ui->peak_pane);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(ui->auto_check), FALSE);
-    wf_recolour_from_sliders(ui);
 }
 
 static void on_db_lock_toggled(GtkToggleButton *toggle, gpointer user_data)
@@ -3828,7 +3885,14 @@ static void on_auto_toggled(GtkToggleButton *toggle, gpointer user_data)
     ui->auto_scale = gtk_toggle_button_get_active(toggle);
     gtk_widget_set_sensitive(ui->db_min_scale, !ui->auto_scale);
     gtk_widget_set_sensitive(ui->db_max_scale, !ui->auto_scale);
-    wf_recolour_from_sliders(ui);
+    if (!ui->auto_scale) {
+        /* leaving auto: the sliders' current window becomes the committed
+         * one (built into the colour-scheme copy) */
+        ui->wf_range_lo = MIN(ui->db_min, ui->db_max);
+        ui->wf_range_hi = MAX(ui->db_min, ui->db_max);
+    }
+    ui->wf_valid = false;
+    gtk_widget_queue_draw(ui->drawing);
 }
 
 /* --- menu handlers ------------------------------------------------------- */
@@ -4753,6 +4817,7 @@ static void on_play_clicked(GtkButton *button, gpointer user_data)
         gtk_button_set_label(GTK_BUTTON(ui->play_btn), PLAY_BTN_LABEL);
     } else {
         ui->playing = true;
+        update_playhead(ui);
         ui->last_play_tick = g_get_monotonic_time();
         gtk_button_set_label(GTK_BUTTON(ui->play_btn), PAUSE_BTN_LABEL);
     }
@@ -4873,6 +4938,7 @@ static void on_window_destroy(GtkWidget *widget, gpointer user_data)
     ui->db_lock_check = NULL;
     ui->play_btn = NULL;
     ui->sel_bw_label = NULL;
+    ui->zoom_bw_label = NULL;
     ui->demod_kind_combo = NULL;
     ui->demod_result_label = NULL;
     ui->demod_const_drawing = NULL;
@@ -4900,6 +4966,19 @@ static void format_bandwidth(const Ui *ui, double hz, char *buf, size_t n)
 
 /* Show the selected bandwidth in the bottom toolbar (the drag's live width
  * while a rectangle is being drawn). */
+/* "zoomed bandwidth": the bandwidth currently shown in the peak view (the
+ * green zoom window over the full-band spectrum). */
+static void update_zoom_bw_label(Ui *ui)
+{
+    char text[96];
+    char bw[48];
+
+    if (ui == NULL || ui->zoom_bw_label == NULL) return;
+    format_bandwidth(ui, ui->visible_bw, bw, sizeof(bw));
+    snprintf(text, sizeof(text), "zoomed bandwidth: %s", bw);
+    gtk_label_set_text(GTK_LABEL(ui->zoom_bw_label), text);
+}
+
 static void update_sel_bw_label(Ui *ui)
 {
     char text[96];
@@ -4908,6 +4987,7 @@ static void update_sel_bw_label(Ui *ui)
     bool have = false;
 
     if (ui == NULL || ui->sel_bw_label == NULL) return;
+    update_zoom_bw_label(ui);
     if (ui->dragging) {
         hz = fabs(ui->drag_freq - ui->drag_anchor_freq);
         have = hz > 0.0;
@@ -5118,6 +5198,7 @@ static gboolean on_timer(gpointer user_data)
          * the file the one-row zero marker is streamed, the playback
          * position resets and the beginning follows seamlessly */
         wrap_scroll_dir(ui, 1);
+        update_playhead(ui);
         {
             double fps = wc_frames_per_second(ui->cache);
 
@@ -5452,13 +5533,11 @@ static void draw_selection_overlay(Ui *ui, cairo_t *cr, int w, int h)
 
 /* Paint the visible frequency bins of one spectrum row onto pixel row p. */
 static void paint_row_columns(cairo_t *cr, const float *row, int p, int w,
-                              float display_min, float range,
                               int b0, int b1, int nbins, int col_step,
-                              const Colormap *cm)
+                              const Ui *ui)
 {
     for (int j = b0; j < b1; j += col_step) {
-        float t = (row[j] - display_min) / range;
-        Rgb8 c = viridis_lookup(cm, t);
+        Rgb8 c = wf_db_colour(ui, row[j]);
         int j_end = j + col_step;
         int x0 = (j - b0) * w / nbins;
         int x1;
@@ -5486,9 +5565,7 @@ static void paint_row_columns(cairo_t *cr, const float *row, int p, int w,
  * do not fall between columns).
  */
 static void paint_row_log(cairo_t *cr, const float *row, int p, int w,
-                          int h, float display_min, float range,
-                          int fft_n, double bin_hz, const Ui *ui,
-                          const Colormap *cm)
+                          int h, int fft_n, double bin_hz, const Ui *ui)
 {
     double lo = view_lo_hz(ui);
     double hi = view_hi_hz(ui);
@@ -5516,12 +5593,8 @@ static void paint_row_log(cairo_t *cr, const float *row, int p, int w,
             }
         }
         {
-            float t = (bv - display_min) / range;
-            Rgb8 c;
+            Rgb8 c = wf_db_colour(ui, bv);
 
-            if (t < 0.0f) t = 0.0f;
-            if (t > 1.0f) t = 1.0f;
-            c = viridis_lookup(cm, t);
             cairo_set_source_rgb(cr, c.r / 255.0, c.g / 255.0, c.b / 255.0);
             cairo_rectangle(cr, x, p, 1, 1);
             cairo_fill(cr);
@@ -5572,8 +5645,8 @@ static uint64_t wf_signature(const Ui *ui, int w, int h)
     WFS_MIX((uint64_t)llround(ui->visible_seconds * 1e6));
     WFS_MIX((uint64_t)llround(ui->visible_bw));
     WFS_MIX((uint64_t)llround(ui->freq_offset));
-    WFS_MIX((uint64_t)llround(ui->db_min * 100.0));
-    WFS_MIX((uint64_t)llround(ui->db_max * 100.0));
+    WFS_MIX((uint64_t)llround(ui->wf_range_lo * 100.0));
+    WFS_MIX((uint64_t)llround(ui->wf_range_hi * 100.0));
     WFS_MIX(ui->auto_scale ? 1u : 0u);
     WFS_MIX(audio_view(ui) ? 1u : 0u);
     WFS_MIX((uint64_t)llround(ui->src != NULL ? ui->src->sample_rate : 0.0));
@@ -5726,12 +5799,11 @@ static void wf_paint_rows(Ui *ui, int w, int h, int y0, int nr)
             }
             if (!wf_row_get(ui, frame, ui->wf_rowbuf)) continue;
             if (audio_view(ui)) {
-            paint_row_log(cr, ui->wf_rowbuf, p, w, h, ui->wf_display_min,
-                          range, fft_n, bin_hz, ui, &ui->colormap);
+            paint_row_log(cr, ui->wf_rowbuf, p, w, h, fft_n, bin_hz,
+                              ui);
         } else {
-                paint_row_columns(cr, ui->wf_rowbuf, p, w, ui->wf_display_min,
-                                  range, b0, b1, nbins, col_step,
-                                  &ui->colormap);
+                paint_row_columns(cr, ui->wf_rowbuf, p, w, b0, b1, nbins,
+                                  col_step, ui);
             }
         }
         cairo_destroy(cr);
@@ -5757,10 +5829,11 @@ static void wf_pick_range(Ui *ui, int w, int h)
     double lo = FLT_MAX, hi = -FLT_MAX;
 
     if (!ui->auto_scale || fft_n <= 0 || !wf_row_buffer(ui, fft_n)) {
-        /* the two sliders are independent: map the ordered pair so
-         * crossing the lower/upper bound still gives a valid gradient */
-        float dlo = (float)MIN(ui->db_min, ui->db_max);
-        float dhi = (float)MAX(ui->db_min, ui->db_max);
+        /* the committed window comes from the sliders (applied on release,
+         * never while dragging): the in-memory colour scheme is built from
+         * it and the renderer only looks values up in that copy */
+        float dlo = (float)MIN(ui->wf_range_lo, ui->wf_range_hi);
+        float dhi = (float)MAX(ui->wf_range_lo, ui->wf_range_hi);
 
         if (dhi - dlo < DB_RANGE_MIN_SPAN) {
             dhi = dlo + (float)DB_RANGE_MIN_SPAN;
@@ -5802,6 +5875,61 @@ static void wf_pick_range(Ui *ui, int w, int h)
     }
     ui->wf_display_min = (float)lo;
     ui->wf_display_max = (float)hi;
+    ui->wf_range_lo = lo;
+    ui->wf_range_hi = hi;
+}
+
+/* The playback position in stream time: the leading (last rendered) edge of
+ * the stream. It advances with playback and stays put when the user scrolls
+ * or pauses, so the waterfall can draw a red line where playback is. */
+static void update_playhead(Ui *ui)
+{
+    double period = wf_stream_period_time(ui);
+
+    if (period <= 0.0) {
+        ui->playhead_valid = false;
+        return;
+    }
+    ui->playhead_time = fmod(ui->scroll_position + ui->visible_seconds,
+                             period);
+    if (ui->playhead_time < 0.0) ui->playhead_time += period;
+    ui->playhead_valid = true;
+}
+
+/* Draw the red playback-position line over the waterfall. The line is only
+ * drawn when the playback position falls inside the visible time span (it
+ * can leave the view when the user scrolls back while paused). */
+static void draw_playhead(Ui *ui, cairo_t *cr, int w, int h)
+{
+    double period, delta, yv;
+
+    if (!ui->playhead_valid || w <= 0 || h <= 0 ||
+        ui->visible_seconds <= 0.0) {
+        return;
+    }
+    period = wf_stream_period_time(ui);
+    delta = ui->playhead_time - ui->wf_top_time;
+    if (period > 0.0) {
+        while (delta < 0.0) delta += period;
+        while (delta >= period) delta -= period;
+    }
+    if (delta < 0.0 || delta > ui->visible_seconds) return;
+    yv = delta / ui->visible_seconds * (double)h;
+    if (yv < 0.0) yv = 0.0;
+    if (yv > (double)h - 1.0) yv = (double)h - 1.0;
+    cairo_save(cr);
+    cairo_set_source_rgba(cr, PLAYHEAD_R, PLAYHEAD_G, PLAYHEAD_B, 0.95);
+    cairo_set_line_width(cr, PLAYHEAD_WIDTH);
+    cairo_move_to(cr, 0.0, yv + 0.5);
+    cairo_line_to(cr, (double)w, yv + 0.5);
+    cairo_stroke(cr);
+    /* a small marker at the right edge makes the line easy to spot */
+    cairo_move_to(cr, (double)w, yv + 0.5);
+    cairo_line_to(cr, (double)w - 10.0, yv - 5.0);
+    cairo_line_to(cr, (double)w - 10.0, yv + 6.0);
+    cairo_close_path(cr);
+    cairo_fill(cr);
+    cairo_restore(cr);
 }
 
 /* How many pixel rows the kept surface has to move to follow the stream:
@@ -6015,6 +6143,7 @@ static gboolean draw_waterfall(GtkWidget *widget, cairo_t *cr, gpointer user_dat
     /* overlays are painted on the widget, never into the kept surface, and
      * use the same view model as the selection code */
     draw_selection_overlay(ui, cr, w, h);
+    draw_playhead(ui, cr, w, h);
     draw_cursor_frequency(ui, cr, w);
     draw_hover_hint(ui, cr, w);
     return FALSE;
@@ -6028,7 +6157,7 @@ static gboolean draw_waterfall(GtkWidget *widget, cairo_t *cr, gpointer user_dat
  * draw_waterfall. The buffer follows the cache's FFT size; ui_cleanup
  * frees it. Sets peak_valid = false when no data is available.
  */
-static void update_peak_spectrum(Ui *ui)
+static void update_peak_spectrum_cached(Ui *ui)
 {
     double fps;
     size_t total_frames;
@@ -6109,11 +6238,99 @@ static void update_peak_spectrum(Ui *ui)
     ui->peak_valid = true;
 }
 
+/* The peak strip shows the mean spectrum of the waterfall pixels that are
+ * currently on screen, fetched from the RENDER BUFFER (the same rows the
+ * renderer displays, via wf_row_frame()/rb_row()), so it matches the visible
+ * data and averages over the view instead of showing one noisy row. Up to
+ * PEAK_MEAN_ROWS evenly spaced pixel rows are averaged. */
+static void update_peak_spectrum(Ui *ui)
+{
+    int fft_n = wc_fft_size(ui->cache);
+    int h = ui->wf_h > 0 ? ui->wf_h : 480;
+    float *row;
+    int sampled = 0;
+    int step;
+
+    if (fft_n <= 0 || wc_total_frames(ui->cache) == 0 || h <= 0 ||
+        ui->src == NULL) {
+        ui->peak_valid = false;
+        return;
+    }
+    if (ui->peak_spectrum == NULL || peak_alloc_bins != fft_n) {
+        free(ui->peak_spectrum);
+        ui->peak_spectrum = malloc((size_t)fft_n * sizeof(float));
+        if (ui->peak_spectrum == NULL) {
+            peak_alloc_bins = 0;
+            ui->peak_valid = false;
+            return;
+        }
+        peak_alloc_bins = fft_n;
+    }
+    if (ui->renderbuf == NULL) {
+        update_peak_spectrum_cached(ui);
+        return;
+    }
+    row = malloc((size_t)fft_n * sizeof(float));
+    if (row == NULL) {
+        update_peak_spectrum_cached(ui);
+        return;
+    }
+    step = h > PEAK_MEAN_ROWS ? (int)((double)h / PEAK_MEAN_ROWS) : 1;
+    if (step < 1) step = 1;
+    memset(ui->peak_spectrum, 0, (size_t)fft_n * sizeof(float));
+    for (int p = 0; p < h; p += step) {
+        size_t frame;
+
+        if (!wf_row_frame(ui, h, p, &frame)) continue;
+        if (!rb_row(ui->renderbuf, frame, row)) continue;
+        for (int b = 0; b < fft_n; b++) ui->peak_spectrum[b] += row[b];
+        sampled++;
+    }
+    free(row);
+    if (sampled == 0) {
+        update_peak_spectrum_cached(ui);
+        return;
+    }
+    {
+        float inv = 1.0f / (float)sampled;
+
+        for (int b = 0; b < fft_n; b++) ui->peak_spectrum[b] *= inv;
+    }
+    ui->peak_valid = true;
+}
+
 /*
  * draw_peak_pane — the full-band mean spectrum with the green zoom
  * rectangle (the horizontal zoom window from the view model) and 4px
  * handle ticks at both edges.
  */
+/* plot area of the peak strip (everything right of the dB axis) */
+static double peak_plot_w(int w)
+{
+    return (double)(w - PEAK_DB_AXIS_W);
+}
+
+static double peak_y_for_db(int h, double db)
+{
+    double span = DB_SCALE_MAX - DB_SCALE_MIN;
+
+    if (db < DB_SCALE_MIN) db = DB_SCALE_MIN;
+    if (db > DB_SCALE_MAX) db = DB_SCALE_MAX;
+    return 1.0 + (DB_SCALE_MAX - db) / span * ((double)h - 2.0);
+}
+
+/* A "nice" tick step for the allowed dB range (5..8 ticks). */
+static double peak_tick_step(void)
+{
+    static const double steps[] = { 5.0, 10.0, 20.0, 25.0, 50.0 };
+    double span = DB_SCALE_MAX - DB_SCALE_MIN;
+
+    for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
+        if (span / steps[i] <= 8.0) return steps[i];
+    }
+    return 50.0;
+}
+
 static gboolean draw_peak_pane(GtkWidget *widget, cairo_t *cr, gpointer user_data)
 {
     Ui *ui = (Ui *)user_data;
@@ -6138,56 +6355,124 @@ static gboolean draw_peak_pane(GtkWidget *widget, cairo_t *cr, gpointer user_dat
         cairo_show_text(cr, PEAK_NO_DATA);
         return FALSE;
     }
-    /* normalise the spectrum to its own min/max */
-    float min_v = ui->peak_spectrum[0];
-    float max_v = ui->peak_spectrum[0];
+    {
+        double pw = peak_plot_w(w);
+        /* The shading follows the sliders live (every value change), unlike
+         * the waterfall colour scheme which commits on release. Auto mode
+         * shades the auto window. */
+        double sel_lo = MIN(ui->auto_scale ? ui->wf_range_lo : ui->db_min,
+                            ui->auto_scale ? ui->wf_range_hi : ui->db_max);
+        double sel_hi = MAX(ui->auto_scale ? ui->wf_range_lo : ui->db_min,
+                            ui->auto_scale ? ui->wf_range_hi : ui->db_max);
+        double step = peak_tick_step();
+        double y_top, y_bot;
 
-    for (int b = 1; b < peak_alloc_bins; b++) {
-        if (ui->peak_spectrum[b] < min_v) {
-            min_v = ui->peak_spectrum[b];
+        if (pw <= 2.0) pw = 2.0;
+        if (sel_lo < DB_SCALE_MIN) sel_lo = DB_SCALE_MIN;
+        if (sel_hi > DB_SCALE_MAX) sel_hi = DB_SCALE_MAX;
+        y_top = peak_y_for_db(h, sel_hi);   /* top of the selected range */
+        y_bot = peak_y_for_db(h, sel_lo);   /* bottom of it              */
+
+        /* the spectrum, mapped onto the allowed dB axis (values outside it
+         * are clamped to the axis ends, like the colour scheme does) */
+        cairo_set_source_rgba(cr, PEAK_FILL_R, PEAK_FILL_G, PEAK_FILL_B,
+                              PEAK_FILL_A);
+        cairo_move_to(cr, PEAK_DB_AXIS_W, (double)h);
+        for (int b = 0; b < peak_alloc_bins; b++) {
+            double x = PEAK_DB_AXIS_W +
+                       (double)b / (double)(peak_alloc_bins - 1) * pw;
+            double y = peak_y_for_db(h, ui->peak_spectrum[b]);
+
+            cairo_line_to(cr, x, y);
         }
-        if (ui->peak_spectrum[b] > max_v) {
-            max_v = ui->peak_spectrum[b];
+        cairo_line_to(cr, (double)w, (double)h);
+        cairo_close_path(cr);
+        cairo_fill(cr);
+
+        /* shade the areas outside the selected min..max range (50 %
+         * opaque blue), before the curve so it stays readable */
+        cairo_set_source_rgba(cr, PEAK_SHADE_R, PEAK_SHADE_G, PEAK_SHADE_B,
+                              PEAK_SHADE_A);
+        if (y_top > 1.0) {
+            cairo_rectangle(cr, 0.0, 1.0, (double)w, y_top - 1.0);
+            cairo_fill(cr);
+        }
+        if (y_bot < (double)h - 1.0) {
+            cairo_rectangle(cr, 0.0, y_bot, (double)w,
+                            (double)h - 1.0 - y_bot);
+            cairo_fill(cr);
+        }
+
+
+        /* dB ticks on the left, calculated from the allowed dB range */
+        cairo_set_source_rgb(cr, 0.62, 0.66, 0.62);
+        cairo_set_line_width(cr, 1.0);
+        cairo_select_font_face(cr, FONT_FAMILY, CAIRO_FONT_SLANT_NORMAL,
+                               CAIRO_FONT_WEIGHT_NORMAL);
+        cairo_set_font_size(cr, 8.0);
+        for (double db = DB_SCALE_MIN; db <= DB_SCALE_MAX + 1e-9;
+             db += step) {
+            double y = peak_y_for_db(h, db);
+            char label[24];
+
+            cairo_move_to(cr, (double)PEAK_DB_AXIS_W - PEAK_DB_TICK_LEN, y);
+            cairo_line_to(cr, (double)PEAK_DB_AXIS_W, y);
+            cairo_stroke(cr);
+            snprintf(label, sizeof(label), "%.0f", db);
+            {
+                cairo_text_extents_t ext;
+
+                cairo_text_extents(cr, label, &ext);
+                cairo_move_to(cr,
+                              (double)PEAK_DB_AXIS_W - PEAK_DB_TICK_LEN - 4.0 -
+                                  ext.width,
+                              y + ext.height / 2.0);
+                cairo_show_text(cr, label);
+            }
+        }
+        cairo_set_source_rgb(cr, 0.35, 0.38, 0.35);
+        cairo_move_to(cr, (double)PEAK_DB_AXIS_W + 0.5, 1.0);
+        cairo_line_to(cr, (double)PEAK_DB_AXIS_W + 0.5, (double)h - 1.0);
+        cairo_stroke(cr);
+
+        /* green zoom-window rectangle, clipped to the plot area */
+        sr = ui->src->sample_rate;
+        x0 = PEAK_DB_AXIS_W + (ui->freq_offset / sr) * pw;
+        x1 = PEAK_DB_AXIS_W + ((ui->freq_offset + ui->visible_bw) / sr) * pw;
+        if (x0 < PEAK_DB_AXIS_W) x0 = PEAK_DB_AXIS_W;
+        if (x1 > (double)w) x1 = (double)w;
+        cairo_set_source_rgba(cr, PEAK_RECT_R, PEAK_RECT_G, PEAK_RECT_B,
+                              PEAK_RECT_A);
+        cairo_rectangle(cr, x0, 0, x1 - x0, h);
+        cairo_fill(cr);
+        cairo_set_source_rgb(cr, PEAK_LINE_R, PEAK_LINE_G, PEAK_LINE_B);
+        cairo_set_line_width(cr, PEAK_LINE_WIDTH);
+        cairo_rectangle(cr, x0, 0, x1 - x0, h);
+        cairo_stroke(cr);
+
+        /* 4px-wide vertical handle ticks at both edges */
+        cairo_set_line_width(cr, PEAK_HANDLE_WIDTH);
+        cairo_move_to(cr, x0, 0);
+        cairo_line_to(cr, x0, h);
+        cairo_move_to(cr, x1, 0);
+        cairo_line_to(cr, x1, h);
+        cairo_stroke(cr);
+
+        /* The areas outside the selected min..max dB range are shaded
+         * 50 % opaque blue over the finished plot; the plot area only, so
+         * the dB axis and its labels stay readable. */
+        cairo_set_source_rgba(cr, PEAK_SHADE_R, PEAK_SHADE_G, PEAK_SHADE_B,
+                              PEAK_SHADE_A);
+        if (y_top > 1.0) {
+            cairo_rectangle(cr, PEAK_DB_AXIS_W, 1.0, pw, y_top - 1.0);
+            cairo_fill(cr);
+        }
+        if (y_bot < (double)h - 1.0) {
+            cairo_rectangle(cr, PEAK_DB_AXIS_W, y_bot, pw,
+                            (double)h - 1.0 - y_bot);
+            cairo_fill(cr);
         }
     }
-    float range = max_v - min_v;
-    if (range < 1.0f) {
-        range = 1.0f;
-    }
-
-    /* filled polygon across the FULL sample-rate span */
-    cairo_set_source_rgba(cr, PEAK_FILL_R, PEAK_FILL_G, PEAK_FILL_B, PEAK_FILL_A);
-    cairo_move_to(cr, 0, h);
-    for (int b = 0; b < peak_alloc_bins; b++) {
-        double x = b / (double)(peak_alloc_bins - 1) * w;
-        float v = (ui->peak_spectrum[b] - min_v) / range;
-        double y = h - v * (h - 2) - 1;
-
-        cairo_line_to(cr, x, y);
-    }
-    cairo_line_to(cr, w, h);
-    cairo_close_path(cr);
-    cairo_fill(cr);
-
-    /* green zoom-window rectangle */
-    sr = ui->src->sample_rate;
-    x0 = (ui->freq_offset / sr) * w;
-    x1 = ((ui->freq_offset + ui->visible_bw) / sr) * w;
-    cairo_set_source_rgba(cr, PEAK_RECT_R, PEAK_RECT_G, PEAK_RECT_B, PEAK_RECT_A);
-    cairo_rectangle(cr, x0, 0, x1 - x0, h);
-    cairo_fill(cr);
-    cairo_set_source_rgb(cr, PEAK_LINE_R, PEAK_LINE_G, PEAK_LINE_B);
-    cairo_set_line_width(cr, PEAK_LINE_WIDTH);
-    cairo_rectangle(cr, x0, 0, x1 - x0, h);
-    cairo_stroke(cr);
-
-    /* 4px-wide vertical handle ticks at both edges */
-    cairo_set_line_width(cr, PEAK_HANDLE_WIDTH);
-    cairo_move_to(cr, x0, 0);
-    cairo_line_to(cr, x0, h);
-    cairo_move_to(cr, x1, 0);
-    cairo_line_to(cr, x1, h);
-    cairo_stroke(cr);
     return FALSE;
 }
 
@@ -6207,6 +6492,7 @@ static gboolean on_peak_press(GtkWidget *widget, GdkEventButton *event, gpointer
         /* double-click: reset to the full band */
         ui->visible_bw = ui->src->sample_rate;
         ui->freq_offset = 0.0;
+        update_sel_bw_label(ui);
         gtk_widget_queue_draw(ui->peak_pane);
         gtk_widget_queue_draw(ui->drawing);
         if (!ui->has_selection) {
@@ -6221,12 +6507,19 @@ static gboolean on_peak_press(GtkWidget *widget, GdkEventButton *event, gpointer
         ui->drag_pan_x = event->x;
         return TRUE;
     }
-    if (width <= 0) {
+    if (width <= PEAK_DB_AXIS_W + 2) {
         return TRUE;
     }
+    if (event->x < (double)PEAK_DB_AXIS_W) {
+        return TRUE;   /* clicks on the dB axis do not zoom */
+    }
     sr = ui->src->sample_rate;
-    x0 = (ui->freq_offset / sr) * width;
-    x1 = ((ui->freq_offset + ui->visible_bw) / sr) * width;
+    {
+        double pw = peak_plot_w(width);
+
+        x0 = PEAK_DB_AXIS_W + (ui->freq_offset / sr) * pw;
+        x1 = PEAK_DB_AXIS_W + ((ui->freq_offset + ui->visible_bw) / sr) * pw;
+    }
     if (fabs(event->x - x0) <= PEAK_HANDLE_GRAB) {
         ui->peak_handle = -1; /* left edge */
     } else if (fabs(event->x - x1) <= PEAK_HANDLE_GRAB) {
@@ -6251,7 +6544,7 @@ static gboolean on_peak_motion(GtkWidget *widget, GdkEventMotion *event, gpointe
     double f_lo;
     double f_hi;
 
-    if (ui->peak_handle == 0 || width <= 0) {
+    if (ui->peak_handle == 0 || width <= PEAK_DB_AXIS_W + 2) {
         return FALSE;
     }
     if ((event->state & GDK_BUTTON1_MASK) == 0) {
@@ -6262,11 +6555,16 @@ static gboolean on_peak_motion(GtkWidget *widget, GdkEventMotion *event, gpointe
     f_hi = ui->src->center_freq + sr / 2.0;
     if (ui->peak_handle == 3) {
         /* drawing mode: the new rectangle spans [anchor, pointer] */
-        double x_a = MIN(ui->drag_pan_x, event->x);
-        double x_b = MAX(ui->drag_pan_x, event->x);
-        double new_lo = x_a / (double)width * sr;
-        double new_hi = x_b / (double)width * sr;
-        double new_bw = new_hi - new_lo;
+        double pw = peak_plot_w(width);
+        double x_a = MIN(ui->drag_pan_x, event->x) - PEAK_DB_AXIS_W;
+        double x_b = MAX(ui->drag_pan_x, event->x) - PEAK_DB_AXIS_W;
+        double new_lo, new_hi, new_bw;
+
+        if (x_a < 0.0) x_a = 0.0;
+        if (x_b > pw) x_b = pw;
+        new_lo = x_a / pw * sr;
+        new_hi = x_b / pw * sr;
+        new_bw = new_hi - new_lo;
 
         if (new_bw >= MIN_FREQ_BW) {
             ui->freq_offset = new_lo;
@@ -6279,13 +6577,19 @@ static gboolean on_peak_motion(GtkWidget *widget, GdkEventMotion *event, gpointe
             }
         }
         /* else: a click without a real drag leaves the zoom unchanged */
+        update_sel_bw_label(ui);
         gtk_widget_queue_draw(ui->peak_pane);
         gtk_widget_queue_draw(ui->drawing);
         return TRUE;
     }
     if (ui->peak_handle == -1) {
         /* left edge: keep the right edge fixed */
-        double f = f_lo + (event->x / (double)width) * sr;
+        double ratio = (event->x - PEAK_DB_AXIS_W) / peak_plot_w(width);
+        double f;
+
+        if (ratio < 0.0) ratio = 0.0;
+        if (ratio > 1.0) ratio = 1.0;
+        f = f_lo + ratio * sr;
         double hi_abs = f_lo + ui->freq_offset + ui->visible_bw;
 
         if (f > hi_abs - MIN_FREQ_BW) {
@@ -6298,7 +6602,12 @@ static gboolean on_peak_motion(GtkWidget *widget, GdkEventMotion *event, gpointe
         ui->freq_offset = f - f_lo;
     } else if (ui->peak_handle == 1) {
         /* right edge: keep the left edge fixed */
-        double f = f_lo + (event->x / (double)width) * sr;
+        double ratio = (event->x - PEAK_DB_AXIS_W) / peak_plot_w(width);
+        double f;
+
+        if (ratio < 0.0) ratio = 0.0;
+        if (ratio > 1.0) ratio = 1.0;
+        f = f_lo + ratio * sr;
         double lo_abs = f_lo + ui->freq_offset;
 
         if (f < lo_abs + MIN_FREQ_BW) {
@@ -6310,7 +6619,8 @@ static gboolean on_peak_motion(GtkWidget *widget, GdkEventMotion *event, gpointe
         ui->visible_bw = f - lo_abs;
     } else {
         /* pan both edges */
-        double dx = (event->x - ui->drag_pan_x) * sr / (double)width;
+        double dx = (event->x - ui->drag_pan_x) * sr /
+                    peak_plot_w(width);
 
         ui->drag_pan_x = event->x;
         ui->freq_offset -= dx;
@@ -6321,6 +6631,7 @@ static gboolean on_peak_motion(GtkWidget *widget, GdkEventMotion *event, gpointe
             ui->freq_offset = sr - ui->visible_bw;
         }
     }
+    update_sel_bw_label(ui);
     gtk_widget_queue_draw(ui->peak_pane);
     gtk_widget_queue_draw(ui->drawing);
     return TRUE;
@@ -6352,6 +6663,11 @@ void ui_init(Ui *ui, IqSource *src, WaterfallCache *cache)
     ui->db_min = DEFAULT_DB_MIN;
     ui->db_max = DEFAULT_DB_MAX;
     ui->auto_scale = true;
+    /* the waterfall colour scheme starts from the default slider window;
+     * the committed window is what the renderer uses (sliders commit on
+     * release) */
+    ui->wf_range_lo = MIN(ui->db_min, ui->db_max);
+    ui->wf_range_hi = MAX(ui->db_min, ui->db_max);
     ui->has_selection = false;
     ui->dragging = false;
     report_save_btn = NULL;
@@ -9504,6 +9820,7 @@ void ui_cleanup(Ui *ui)
     ui->db_lock_check = NULL;
     ui->play_btn = NULL;
     ui->sel_bw_label = NULL;
+    ui->zoom_bw_label = NULL;
     ui->demod_kind_combo = NULL;
     ui->demod_result_label = NULL;
     ui->demod_const_drawing = NULL;
@@ -9704,6 +10021,7 @@ void ui_reset_source(Ui *ui)
     wf_len_init_widgets(ui); /* refresh the length combo/entry (guarded) */
     ui->freq_offset = 0.0;
     ui->visible_bw = ui->src->sample_rate;
+    update_sel_bw_label(ui);   /* the zoom read-out starts at the full band */
     /* The cache may have been rebuilt with a different FFT size (Settings >
      * Waterfall > FFT size): the streaming buffers and the render buffer
      * must be rebuilt for it, and the surface must be computed again from
@@ -9905,11 +10223,28 @@ void ui_build_window(Ui *ui)
                            CONTROL_SPACING);
     }
     /* selected bandwidth, centred in the toolbar */
-    ui->sel_bw_label = gtk_label_new("selected bandwidth: \xE2\x80\x94");
-    gtk_widget_set_halign(ui->sel_bw_label, GTK_ALIGN_CENTER);
-    gtk_widget_set_hexpand(ui->sel_bw_label, TRUE);
-    gtk_label_set_ellipsize(GTK_LABEL(ui->sel_bw_label), PANGO_ELLIPSIZE_END);
-    gtk_box_pack_start(GTK_BOX(control_box), ui->sel_bw_label, TRUE, TRUE, 0);
+    /* the two bandwidth read-outs: selection above, peak-view zoom below */
+    {
+        GtkWidget *bw_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+
+        gtk_widget_set_halign(bw_box, GTK_ALIGN_CENTER);
+        gtk_widget_set_hexpand(bw_box, TRUE);
+        ui->sel_bw_label = gtk_label_new("selected bandwidth: \xE2\x80\x94");
+        gtk_widget_set_halign(ui->sel_bw_label, GTK_ALIGN_CENTER);
+        gtk_widget_set_hexpand(ui->sel_bw_label, TRUE);
+        gtk_label_set_ellipsize(GTK_LABEL(ui->sel_bw_label),
+                                PANGO_ELLIPSIZE_END);
+        ui->zoom_bw_label = gtk_label_new("zoomed bandwidth: \xE2\x80\x94");
+        gtk_widget_set_halign(ui->zoom_bw_label, GTK_ALIGN_CENTER);
+        gtk_widget_set_hexpand(ui->zoom_bw_label, TRUE);
+        gtk_label_set_ellipsize(GTK_LABEL(ui->zoom_bw_label),
+                                PANGO_ELLIPSIZE_END);
+        gtk_box_pack_start(GTK_BOX(bw_box), ui->sel_bw_label, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(bw_box), ui->zoom_bw_label, FALSE, FALSE,
+                           0);
+        gtk_box_pack_start(GTK_BOX(control_box), bw_box, TRUE, TRUE, 0);
+        update_sel_bw_label(ui);   /* start with the current zoom window */
+    }
 
     GtkWidget *db_min_label = gtk_label_new("Min dB:");
     gtk_box_pack_start(GTK_BOX(control_box), db_min_label, FALSE, FALSE, CONTROL_SPACING);
@@ -9918,6 +10253,10 @@ void ui_build_window(Ui *ui)
     gtk_range_set_value(GTK_RANGE(ui->db_min_scale), ui->db_min);
     gtk_widget_set_size_request(ui->db_min_scale, DB_SCALE_WIDTH, -1);
     g_signal_connect(ui->db_min_scale, "value-changed", G_CALLBACK(on_db_min_changed), ui);
+    g_signal_connect(ui->db_min_scale, "button-release-event",
+                     G_CALLBACK(on_db_range_released), ui);
+    g_signal_connect(ui->db_min_scale, "key-release-event",
+                     G_CALLBACK(on_db_range_released), ui);
     gtk_box_pack_start(GTK_BOX(control_box), ui->db_min_scale, FALSE, FALSE, CONTROL_SPACING);
 
     GtkWidget *db_max_label = gtk_label_new("Max dB:");
@@ -9927,6 +10266,10 @@ void ui_build_window(Ui *ui)
     gtk_range_set_value(GTK_RANGE(ui->db_max_scale), ui->db_max);
     gtk_widget_set_size_request(ui->db_max_scale, DB_SCALE_WIDTH, -1);
     g_signal_connect(ui->db_max_scale, "value-changed", G_CALLBACK(on_db_max_changed), ui);
+    g_signal_connect(ui->db_max_scale, "button-release-event",
+                     G_CALLBACK(on_db_range_released), ui);
+    g_signal_connect(ui->db_max_scale, "key-release-event",
+                     G_CALLBACK(on_db_range_released), ui);
     gtk_box_pack_start(GTK_BOX(control_box), ui->db_max_scale, FALSE, FALSE, CONTROL_SPACING);
 
     ui->db_lock_check = gtk_check_button_new_with_label("Lock");

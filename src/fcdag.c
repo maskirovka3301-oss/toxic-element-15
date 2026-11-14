@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "fclattice.h"
+#include "fcdrift.h"
 #include "fclk.h"
 
 #define FC_PERM_REPS     400
@@ -62,6 +63,12 @@ typedef struct {
     FclScope    scope;
     const bool *enabled;    /* user selection (NULL = all enabled) */
     const FcProgress *progress;  /* optional worker progress         */
+    /* warm-up drift correction (applied before the analyses) */
+    double     **drift_values;   /* [n_blocks] corrected series      */
+    double      *drift_min, *drift_max;
+    FcdResult   *drift_results;  /* [n_blocks]                       */
+    FcdGlobal    drift_global;
+    bool         drift_applied;
     /* evidence accumulated by the individual analyses */
     struct {
         char   family[24];
@@ -77,6 +84,32 @@ typedef struct {
     size_t      cap_evidence;
     bool        have_evidence;
 } FcCtx;
+
+/* The values every analysis uses: drift-corrected when the drift node
+ * produced a correction, otherwise the raw measurements. */
+static const double *block_values(const FcCtx *c, size_t b)
+{
+    if (c->drift_values != NULL && c->drift_values[b] != NULL) {
+        return c->drift_values[b];
+    }
+    return c->blocks[b].values;
+}
+
+static double block_min(const FcCtx *c, size_t b)
+{
+    if (c->drift_values != NULL && c->drift_values[b] != NULL) {
+        return c->drift_min[b];
+    }
+    return c->blocks[b].min_hz;
+}
+
+static double block_max(const FcCtx *c, size_t b)
+{
+    if (c->drift_values != NULL && c->drift_values[b] != NULL) {
+        return c->drift_max[b];
+    }
+    return c->blocks[b].max_hz;
+}
 
 /* Per-family evidence weight used when synthesising the spacings. */
 static double evidence_weight(const char *family)
@@ -116,6 +149,8 @@ static void ctx_add_evidence(FcCtx *c, const char *family, size_t block,
 
 const DagCoreNodeSpec fc_node_specs[] = {
     { "blocks", "Measurement blocks", NULL },
+    { "drift-correction", "Device warm-up drift estimation and correction",
+      "blocks" },
     { "rayleigh", "Rayleigh circular-uniformity test", "blocks" },
     { "vtest", "V test for the lattice direction", "rayleigh" },
     { "pdm", "Phase dispersion minimisation", "vtest" },
@@ -242,6 +277,117 @@ static FclTable *analysis_blocks(FcCtx *c)
 }
 
 /* ------------------------------------------------------------------ */
+/* node: device warm-up drift estimation and correction               */
+/* ------------------------------------------------------------------ */
+
+static FclTable *analysis_drift(FcCtx *c)
+{
+    static const char *cols[] = { "Block", "n", "time base", "model",
+                                  "tau (units)", "settle t95",
+                                  "amplitude (Hz)", "plateau (MHz)",
+                                  "RMS before (Hz)", "RMS after (Hz)",
+                                  "corrected" };
+    FclTable *t = fcl_table_new(
+        "Device warm-up drift and settling time", cols, 11);
+
+    if (t == NULL) return NULL;
+    for (size_t b = 0; b < c->n_blocks; b++) {
+        const double *times = NULL;
+        size_t n_times = 0;
+        FcdResult *res = &c->drift_results[b];
+        char cells[11][128];
+
+        /* observation times: the schema has no per-measurement timestamps
+         * yet, so the sample index is the time base (see fcdrift.h); the
+         * stub returns NULL until the schema provides seconds-since-video */
+        if (fcd_timestamps_available()) {
+            times = fcd_round_times(NULL, &n_times);
+            if (n_times != c->blocks[b].n) times = NULL;
+        }
+        memset(res, 0, sizeof(*res));
+        if (c->blocks[b].n < 8) {
+            snprintf(cells[0], sizeof(cells[0]), "%s", c->blocks[b].label);
+            snprintf(cells[1], sizeof(cells[1]), "%zu", c->blocks[b].n);
+            snprintf(cells[2], sizeof(cells[2]), "%s",
+                     times != NULL ? "seconds" : "index (stub)");
+            snprintf(cells[3], sizeof(cells[3]), "too short");
+            snprintf(cells[4], sizeof(cells[4]), "-");
+            snprintf(cells[5], sizeof(cells[5]), "-");
+            snprintf(cells[6], sizeof(cells[6]), "-");
+            snprintf(cells[7], sizeof(cells[7]), "-");
+            snprintf(cells[8], sizeof(cells[8]), "-");
+            snprintf(cells[9], sizeof(cells[9]), "-");
+            snprintf(cells[10], sizeof(cells[10]), "no");
+            fc_add_cells(t, cells, 11);
+            continue;
+        }
+        fcd_estimate(c->blocks[b].values, times, c->blocks[b].n, res);
+        snprintf(cells[0], sizeof(cells[0]), "%s", c->blocks[b].label);
+        snprintf(cells[1], sizeof(cells[1]), "%zu", c->blocks[b].n);
+        snprintf(cells[2], sizeof(cells[2]), "%s",
+                 times != NULL ? "seconds" : "index (stub)");
+        snprintf(cells[3], sizeof(cells[3]), "%s", fcd_model_name(res->model));
+        snprintf(cells[4], sizeof(cells[4]), "%s%.2f",
+                 res->model == FCD_MODEL_EXP2 ? "fast " : "",
+                 res->model == FCD_MODEL_EXP2 ? res->tau1 : res->tau1);
+        snprintf(cells[5], sizeof(cells[5]), "%.1f", res->settle_time);
+        snprintf(cells[6], sizeof(cells[6]), "%.2f",
+                 fabs(res->amp1) + fabs(res->amp2));
+        snprintf(cells[7], sizeof(cells[7]), "%.6f",
+                 (res->model == FCD_MODEL_NONE ? c->blocks[b].values[0]
+                                               : res->level) / 1e6);
+        snprintf(cells[8], sizeof(cells[8]), "%.2f", res->rms_before);
+        snprintf(cells[9], sizeof(cells[9]), "%.2f", res->rms_after);
+        snprintf(cells[10], sizeof(cells[10]), "%s",
+                 res->corrected ? "yes" : "no");
+        if (res->corrected) {
+            double *corr = malloc(c->blocks[b].n * sizeof(*corr));
+
+            if (corr != NULL) {
+                fcd_correct(c->blocks[b].values, times, c->blocks[b].n, res,
+                            corr);
+                c->drift_values[b] = corr;
+                c->drift_min[b] = corr[0];
+                c->drift_max[b] = corr[0];
+                for (size_t i = 1; i < c->blocks[b].n; i++) {
+                    if (corr[i] < c->drift_min[b]) c->drift_min[b] = corr[i];
+                    if (corr[i] > c->drift_max[b]) c->drift_max[b] = corr[i];
+                }
+                c->drift_applied = true;
+            }
+        }
+        fc_add_cells(t, cells, 11);
+    }
+    fcd_pool(c->drift_results, c->n_blocks, &c->drift_global);
+    fcl_table_note(t, "The warm-up drift of a frequency counter is modelled "
+                      "as a constant, linear, exponential or double-"
+                      "exponential approach to the settled frequency "
+                      "(f(t) = f_inf + A*exp(-t/tau), optional fast+slow "
+                      "thermal terms), fitted robustly (IRLS) with a "
+                      "variable-projection grid search over tau and selected "
+                      "by BIC. Corrected measurements subtract the fitted "
+                      "transient, keeping the settled level. Without "
+                      "per-measurement timestamps the sample index is the "
+                      "time base (the stub fcd_round_times() will provide "
+                      "seconds-since-video once the schema has it).");
+    if (c->drift_global.n_rounds > 0) {
+        fcl_table_note(t, "Pooled device parameters across all rounds/"
+                          "datasets: tau = %.1f %s, t95 settling = %.1f %s, "
+                          "median peak drift = %.2f Hz (%zu round(s) fitted, "
+                          "%zu corrected).", c->drift_global.tau_median,
+                       c->drift_global.timestamps ? "s" : "samples",
+                       c->drift_global.t95_median,
+                       c->drift_global.timestamps ? "s" : "samples",
+                       c->drift_global.amp_median, c->drift_global.n_rounds,
+                       c->drift_global.n_corrected);
+    } else {
+        fcl_table_note(t, "No round produced a drift model: the measurements "
+                          "are too short or show no significant drift.");
+    }
+    return t;
+}
+
+/* ------------------------------------------------------------------ */
 /* node: Rayleigh                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -263,13 +409,13 @@ static FclTable *analysis_rayleigh(FcCtx *c)
                 char label[192];
 
                 if (c->blocks[b].n < 3) continue;
-                fcl_circular_stats(c->blocks[b].values, c->blocks[b].n, f0, df,
+                fcl_circular_stats(block_values(c, b), c->blocks[b].n, f0, df,
                                    &ang, &R);
                 z = (double)c->blocks[b].n * R * R;
                 p_asym = fcl_rayleigh_p(c->blocks[b].n, R);
                 p_perm = fcl_perm_rayleigh(
-                    c->blocks[b].values, c->blocks[b].n, f0, df,
-                    c->blocks[b].min_hz, c->blocks[b].max_hz, reps, &c->rng);
+                    block_values(c, b), c->blocks[b].n, f0, df,
+                    block_min(c, b), block_max(c, b), reps, &c->rng);
                 snprintf(cells[0], sizeof(cells[0]), "%s", c->blocks[b].label);
                 snprintf(cells[1], sizeof(cells[1]), "%.1f", df / 1e3);
                 snprintf(cells[2], sizeof(cells[2]), "%zu", c->blocks[b].n);
@@ -321,12 +467,12 @@ static FclTable *analysis_vtest(FcCtx *c)
                 char label[192];
 
                 if (c->blocks[b].n < 3) continue;
-                fcl_circular_stats(c->blocks[b].values, c->blocks[b].n, f0, df,
+                fcl_circular_stats(block_values(c, b), c->blocks[b].n, f0, df,
                                    &ang, &R);
                 V = fcl_v_statistic(c->blocks[b].n, R, ang, 0.0);
                 p_perm = fcl_perm_v(
-                    c->blocks[b].values, c->blocks[b].n, f0, df,
-                    c->blocks[b].min_hz, c->blocks[b].max_hz, 0.0, reps,
+                    block_values(c, b), c->blocks[b].n, f0, df,
+                    block_min(c, b), block_max(c, b), 0.0, reps,
                     &c->rng);
                 snprintf(cells[0], sizeof(cells[0]), "%s", c->blocks[b].label);
                 snprintf(cells[1], sizeof(cells[1]), "%.1f", df / 1e3);
@@ -377,11 +523,11 @@ static FclTable *analysis_pdm(FcCtx *c)
                 bins = (size_t)sqrt((double)c->blocks[b].n) + 2;
                 if (bins < 4) bins = 4;
                 if (bins > 20) bins = 20;
-                theta = fcl_pdm(c->blocks[b].values, c->blocks[b].n, f0, df,
+                theta = fcl_pdm(block_values(c, b), c->blocks[b].n, f0, df,
                                 bins);
                 p_perm = fcl_perm_pdm(
-                    c->blocks[b].values, c->blocks[b].n, f0, df,
-                    c->blocks[b].min_hz, c->blocks[b].max_hz, bins, reps,
+                    block_values(c, b), c->blocks[b].n, f0, df,
+                    block_min(c, b), block_max(c, b), bins, reps,
                     &c->rng);
                 snprintf(cells[0], sizeof(cells[0]), "%s", c->blocks[b].label);
                 snprintf(cells[1], sizeof(cells[1]), "%.1f", df / 1e3);
@@ -424,7 +570,7 @@ static FclTable *analysis_periodogram(FcCtx *c)
         for (double df = 2000.0; df <= 300000.0; df += 1000.0) {
             double R = 0.0, z;
 
-            fcl_circular_stats(c->blocks[b].values, c->blocks[b].n, 0.0, df,
+            fcl_circular_stats(block_values(c, b), c->blocks[b].n, 0.0, df,
                                NULL, &R);
             z = (double)c->blocks[b].n * R * R;
             for (size_t k = 0; k < n_best; k++) {
@@ -496,8 +642,8 @@ static FclTable *analysis_chisq(FcCtx *c)
 
                 if (c->blocks[b].n < 10) continue;
                 chi2 = fcl_chi2_lattice(
-                    c->blocks[b].values, c->blocks[b].n, f0, df,
-                    c->blocks[b].min_hz, c->blocks[b].max_hz, 0.25, &dfree,
+                    block_values(c, b), c->blocks[b].n, f0, df,
+                    block_min(c, b), block_max(c, b), 0.25, &dfree,
                     &valid);
                 if (!valid) continue;
                 {
@@ -553,11 +699,11 @@ static FclTable *analysis_kde(FcCtx *c)
 
                 if (c->blocks[b].n < 5) continue;
                 enrich = fcl_kde_enrichment(
-                    c->blocks[b].values, c->blocks[b].n, f0, df,
-                    c->blocks[b].min_hz, c->blocks[b].max_hz);
+                    block_values(c, b), c->blocks[b].n, f0, df,
+                    block_min(c, b), block_max(c, b));
                 p_perm = fcl_perm_enrichment(
-                    c->blocks[b].values, c->blocks[b].n, f0, df,
-                    c->blocks[b].min_hz, c->blocks[b].max_hz, reps,
+                    block_values(c, b), c->blocks[b].n, f0, df,
+                    block_min(c, b), block_max(c, b), reps,
                     &c->rng);
                 snprintf(cells[0], sizeof(cells[0]), "%s", c->blocks[b].label);
                 snprintf(cells[1], sizeof(cells[1]), "%.1f", df / 1e3);
@@ -600,8 +746,8 @@ static FclTable *analysis_cluster(FcCtx *c)
         char cells[6][128];
 
         if (c->blocks[b].n < 10) continue;
-        fcl_cluster_test(c->blocks[b].values, c->blocks[b].n,
-                         c->blocks[b].min_hz, c->blocks[b].max_hz, 64, reps,
+        fcl_cluster_test(block_values(c, b), c->blocks[b].n,
+                         block_min(c, b), block_max(c, b), 64, reps,
                          &c->rng, &mass, &extent, &p);
         snprintf(cells[0], sizeof(cells[0]), "%s", c->blocks[b].label);
         snprintf(cells[1], sizeof(cells[1]), "%zu", c->blocks[b].n);
@@ -640,7 +786,7 @@ static FclTable *analysis_multimodal(FcCtx *c)
         double p;
         char cells[5][128];
 
-        p = fcl_silverman(c->blocks[b].values, c->blocks[b].n, 1, 40, &c->rng,
+        p = fcl_silverman(block_values(c, b), c->blocks[b].n, 1, 40, &c->rng,
                           &modes);
         snprintf(cells[0], sizeof(cells[0]), "%s", c->blocks[b].label);
         snprintf(cells[1], sizeof(cells[1]), "%zu", c->blocks[b].n);
@@ -772,9 +918,9 @@ static FclTable *analysis_summary(FcCtx *c)
                         ? c->best_df[b] : 15000.0;
         double angle = 0.0, R = 0.0, z, p;
         char *rose, *comb;
-        double span = c->blocks[b].max_hz - c->blocks[b].min_hz;
+        double span = block_max(c, b) - block_min(c, b);
 
-        fcl_circular_stats(c->blocks[b].values, c->blocks[b].n, 0.0, df,
+        fcl_circular_stats(block_values(c, b), c->blocks[b].n, 0.0, df,
                            &angle, &R);
         z = (double)c->blocks[b].n * R * R;
         p = fcl_rayleigh_p(c->blocks[b].n, R);
@@ -787,9 +933,9 @@ static FclTable *analysis_summary(FcCtx *c)
                  p < FC_ALPHA ? "clustering supports this spacing"
                               : "no significant clustering");
         fc_add_cells(t, cells, 6);
-        rose = fcl_rose_plot(c->blocks[b].values, c->blocks[b].n, 0.0, df, 12,
+        rose = fcl_rose_plot(block_values(c, b), c->blocks[b].n, 0.0, df, 12,
                              8);
-        comb = fcl_comb_plot(c->blocks[b].values, c->blocks[b].n, 0.0, df, 48,
+        comb = fcl_comb_plot(block_values(c, b), c->blocks[b].n, 0.0, df, 48,
                              6);
         if (rose != NULL && comb != NULL && c->blocks[b].n >= 10 &&
             span > 0.0) {
@@ -830,8 +976,8 @@ static FclTable *analysis_induced_scan(FcCtx *c)
 
         if (c->blocks[b].n < 8) continue;
         df = k_spacing(c, b);
-        fclk_scan_block(c->blocks[b].values, c->blocks[b].n,
-                        c->blocks[b].min_hz, c->blocks[b].max_hz, df,
+        fclk_scan_block(block_values(c, b), c->blocks[b].n,
+                        block_min(c, b), block_max(c, b), df,
                         FCLK_MAX, reps, &c->rng, &c->scan[b * FCLK_MAX]);
         c->finest_k[b] = fclk_finest_significant(
             &c->scan[b * FCLK_MAX], FCLK_MAX, 0.05);
@@ -893,7 +1039,7 @@ static FclTable *analysis_k_dispersion(FcCtx *c)
         bool ok;
 
         if (c->blocks[b].n < 8) continue;
-        ok = fclk_dispersion_estimate(c->blocks[b].values, c->blocks[b].n, df,
+        ok = fclk_dispersion_estimate(block_values(c, b), c->blocks[b].n, df,
                                       FCLK_MAX, &khat, &s1, &sbest);
         if (!ok) continue;
         c->have_reference = true;
@@ -940,9 +1086,9 @@ static FclTable *analysis_cf_slope(FcCtx *c)
         char cells[5][128];
 
         if (c->blocks[b].n < 12) continue;
-        k_hat = fclk_cf_slope(c->blocks[b].values, c->blocks[b].n, df, 0.0,
-                              FCLK_MAX, c->blocks[b].min_hz,
-                              c->blocks[b].max_hz, &r2);
+        k_hat = fclk_cf_slope(block_values(c, b), c->blocks[b].n, df, 0.0,
+                              FCLK_MAX, block_min(c, b),
+                              block_max(c, b), &r2);
         if (k_hat <= 0 || r2 < 0.5) continue;
         c->have_cf = true;
         c->k_cf[b] = k_hat;
@@ -988,9 +1134,9 @@ static FclTable *analysis_mixture(FcCtx *c)
         for (int K = 1; K <= FCLK_MAX; K++) {
             FclkMixtureFit *fit = &c->fits[b * FCLK_MAX + K - 1];
 
-            if (!fclk_mixture_fit(c->blocks[b].values, c->blocks[b].n, 0.0,
-                                  df, K, c->blocks[b].min_hz,
-                                  c->blocks[b].max_hz, fit)) {
+            if (!fclk_mixture_fit(block_values(c, b), c->blocks[b].n, 0.0,
+                                  df, K, block_min(c, b),
+                                  block_max(c, b), fit)) {
                 continue;
             }
             any = true;
@@ -1147,9 +1293,9 @@ static FclTable *analysis_k_summary(FcCtx *c)
                      : "single-subcarrier readings on the df grid");
         fc_add_cells(t, cells, 6);
         if (c->blocks[b].n >= 10) {
-            rose = fcl_rose_plot(c->blocks[b].values, c->blocks[b].n, 0.0,
+            rose = fcl_rose_plot(block_values(c, b), c->blocks[b].n, 0.0,
                                  delta, 12, 6);
-            comb = fcl_comb_plot(c->blocks[b].values, c->blocks[b].n, 0.0,
+            comb = fcl_comb_plot(block_values(c, b), c->blocks[b].n, 0.0,
                                  delta, 48, 5);
             if (rose != NULL && comb != NULL) {
                 fcl_table_note(t, "block: %s (K = %d, induced delta = %.0f Hz)",
@@ -1511,6 +1657,7 @@ static bool fc_execute(void *ctx, DagCoreNode *node, char *err, size_t err_len)
     (void)err_len;
     if (id == NULL) return false;
     if (strcmp(id, "blocks") == 0) table = analysis_blocks(c);
+    else if (strcmp(id, "drift-correction") == 0) table = analysis_drift(c);
     else if (strcmp(id, "rayleigh") == 0) table = analysis_rayleigh(c);
     else if (strcmp(id, "vtest") == 0) table = analysis_vtest(c);
     else if (strcmp(id, "pdm") == 0) table = analysis_pdm(c);
@@ -1639,6 +1786,10 @@ FcRun *fc_dag_run(const FcDatasetList *list, FclScope scope,
         ctx.k_icl = calloc(ctx.n_blocks, sizeof(*ctx.k_icl));
         ctx.k_final = calloc(ctx.n_blocks, sizeof(*ctx.k_final));
         ctx.dbic = calloc(ctx.n_blocks, sizeof(*ctx.dbic));
+        ctx.drift_values = calloc(ctx.n_blocks, sizeof(*ctx.drift_values));
+        ctx.drift_min = calloc(ctx.n_blocks, sizeof(*ctx.drift_min));
+        ctx.drift_max = calloc(ctx.n_blocks, sizeof(*ctx.drift_max));
+        ctx.drift_results = calloc(ctx.n_blocks, sizeof(*ctx.drift_results));
         if (ctx.best_p != NULL && ctx.best_df != NULL) {
             for (size_t i = 0; i < ctx.n_blocks; i++) {
                 ctx.best_p[i] = 1.0;
@@ -1668,6 +1819,13 @@ FcRun *fc_dag_run(const FcDatasetList *list, FclScope scope,
     free(ctx.k_icl);
     free(ctx.k_final);
     free(ctx.dbic);
+    if (ctx.drift_values != NULL) {
+        for (size_t i = 0; i < ctx.n_blocks; i++) free(ctx.drift_values[i]);
+    }
+    free(ctx.drift_values);
+    free(ctx.drift_min);
+    free(ctx.drift_max);
+    free(ctx.drift_results);
     free(ctx.tests);
     free(ctx.evidence);
     return run;

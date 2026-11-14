@@ -52,6 +52,7 @@
 #include "fcdag.h"
 #include "fcreport.h"
 #include "fcdataset.h"
+#include "fcdrift.h"
 #include "fclattice.h"
 #include "fclk.h"
 #include "renderbuf.h"
@@ -4439,7 +4440,7 @@ static void test_dagcore(void)
     }
 
     /* the Spectrum and Frequency Counter registries share this engine */
-    CHECK(fc_node_count == 20);
+    CHECK(fc_node_count == 21);
     {
         FcDatasetList list;
         FcRun *fc_run;
@@ -4763,6 +4764,12 @@ static void test_fclk(void)
             }
             CHECK(idx != (size_t)-1);
             if (idx != (size_t)-1) enabled[idx] = false;
+            /* the drift correction is optional too */
+            for (size_t i = 0; i < fc_node_count; i++) {
+                if (strcmp(fc_node_specs[i].id, "drift-correction") == 0) {
+                    enabled[i] = false;
+                }
+            }
         }
         if (list.count == 1) {
             run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, enabled, NULL, err,
@@ -4780,6 +4787,24 @@ static void test_fclk(void)
                       run->nodes[periodogram].status == DAGCORE_SKIPPED);
                 CHECK(strstr(run->nodes[periodogram].note, "did not run") !=
                       NULL);
+                {
+                    size_t drift = dagcore_find(run, "drift-correction");
+                    size_t ray = dagcore_find(run, "rayleigh");
+                    char *rt = NULL, *rm = NULL, *rh = NULL;
+
+                    CHECK(drift != (size_t)-1 &&
+                          run->nodes[drift].status == DAGCORE_SKIPPED);
+                    CHECK(ray != (size_t)-1 &&
+                          run->nodes[ray].status == DAGCORE_DONE);
+                    fc_report(&list, run, FCL_SCOPE_PER_DATASET, &rt, &rm,
+                              &rh);
+                    CHECK(rt != NULL &&
+                          strstr(rt, "disabled by the analysis selection") !=
+                              NULL);
+                    free(rt);
+                    free(rm);
+                    free(rh);
+                }
                 fc_report(&list, run, FCL_SCOPE_PER_DATASET, &text, &md,
                           &html);
                 CHECK(text != NULL &&
@@ -4861,6 +4886,128 @@ static void test_fclk(void)
 
     free(avg3);
     free(single);
+}
+
+/* ------------------------------------------------------------------ */
+/* Warm-up drift estimation and correction                            */
+/* ------------------------------------------------------------------ */
+
+static void test_fcdrift(void)
+{
+    enum { N = 240 };
+    double *y = malloc(N * sizeof(*y));
+    double *corr = malloc(N * sizeof(*corr));
+    FclRng rng;
+    FcdResult res;
+
+    puts("\n-- device warm-up drift --");
+    CHECK(y != NULL && corr != NULL);
+    if (y == NULL || corr == NULL) {
+        free(y);
+        free(corr);
+        return;
+    }
+    fcl_rng_seed(&rng, 20261114);
+
+    /* an exponential warm-up transient with noise */
+    {
+        double tau = 40.0, amp = 500.0, level = 2529000000.0;
+
+        memset(&res, 0, sizeof(res));
+        for (size_t i = 0; i < N; i++) {
+            y[i] = level + amp * exp(-(double)i / tau) +
+                   20.0 * fcl_rng_normal(&rng);
+        }
+        CHECK(fcd_estimate(y, NULL, N, &res));
+        printf("  exponential: model=%s tau=%.1f (true 40) amp=%.1f "
+               "(true 500) settle=%.1f rms %.2f -> %.2f\n",
+               fcd_model_name(res.model), res.tau1,
+               fabs(res.amp1) + fabs(res.amp2), res.settle_time,
+               res.rms_before, res.rms_after);
+        CHECK(res.model == FCD_MODEL_EXP || res.model == FCD_MODEL_EXP2);
+        if (res.model == FCD_MODEL_EXP) {
+            CHECK(res.tau1 > 20.0 && res.tau1 < 80.0);
+        }
+        CHECK(fabs(fabs(res.amp1) + fabs(res.amp2) - amp) < 0.35 * amp);
+        CHECK(res.corrected);
+        CHECK(res.settle_time > 60.0);
+        CHECK(res.rms_after < 0.5 * res.rms_before);
+        fcd_correct(y, NULL, N, &res, corr);
+        {
+            double mean = 0.0, sd = 0.0;
+
+            for (size_t i = 0; i < N; i++) mean += corr[i];
+            mean /= (double)N;
+            for (size_t i = 0; i < N; i++) {
+                sd += (corr[i] - mean) * (corr[i] - mean);
+            }
+            sd = sqrt(sd / (double)N);
+            printf("  corrected sd=%.2f Hz (raw about 500)\n", sd);
+            CHECK(sd < 60.0);
+        }
+    }
+
+    /* no drift: no correction is applied */
+    {
+        memset(&res, 0, sizeof(res));
+        for (size_t i = 0; i < N; i++) {
+            y[i] = 2529000000.0 + 20.0 * fcl_rng_normal(&rng);
+        }
+        fcd_estimate(y, NULL, N, &res);
+        printf("  flat: model=%s corrected=%d\n", fcd_model_name(res.model),
+               (int)res.corrected);
+        CHECK(!res.corrected);
+    }
+
+    /* linear drift */
+    {
+        memset(&res, 0, sizeof(res));
+        for (size_t i = 0; i < N; i++) {
+            y[i] = 2529000000.0 + 2.0 * (double)i +
+                   15.0 * fcl_rng_normal(&rng);
+        }
+        CHECK(fcd_estimate(y, NULL, N, &res));
+        printf("  linear: model=%s slope=%.2f corrected=%d\n",
+               fcd_model_name(res.model), res.slope, (int)res.corrected);
+        CHECK(res.model == FCD_MODEL_LINEAR || res.model == FCD_MODEL_EXP);
+        CHECK(res.corrected);
+    }
+
+    /* pooling across rounds */
+    {
+        FcdResult results[3];
+
+        for (int r = 0; r < 3; r++) {
+            memset(&results[r], 0, sizeof(results[r]));
+            results[r].model = FCD_MODEL_EXP;
+            results[r].tau1 = 40.0 + 2.0 * r;
+            results[r].amp1 = 500.0 + 10.0 * r;
+            results[r].settle_time = results[r].tau1 * log(20.0);
+            results[r].corrected = true;
+        }
+        {
+            FcdGlobal g;
+
+            fcd_pool(results, 3, &g);
+            printf("  pooled: tau=%.1f t95=%.1f amp=%.1f rounds=%zu\n",
+                   g.tau_median, g.t95_median, g.amp_median, g.n_rounds);
+            CHECK(g.n_rounds == 3);
+            CHECK(g.n_corrected == 3);
+            CHECK(fabs(g.tau_median - 42.0) < 2.5);
+        }
+    }
+
+    /* timestamp stub: unavailable until the schema provides times */
+    CHECK(!fcd_timestamps_available());
+    {
+        size_t n_times = 1;
+
+        CHECK(fcd_round_times(NULL, &n_times) == NULL);
+        CHECK(n_times == 0);
+    }
+
+    free(y);
+    free(corr);
 }
 
 static void test_fcdataset(void)
@@ -5316,7 +5463,7 @@ static void test_fcdag(void)
 
     puts("\n-- Frequency Counter analysis DAG --");
     fcd_list_init(&list);
-    CHECK(fc_node_count == 20);   /* the subcarrier-lattice test chain */
+    CHECK(fc_node_count == 21);   /* the subcarrier-lattice test chain */
     run = fc_dag_run(&list, FCL_SCOPE_PER_DATASET, NULL, NULL,
                              err, sizeof(err));
     CHECK(run != NULL);
@@ -5332,7 +5479,7 @@ static void test_fcdag(void)
                                      NULL,
                    strstr(text, "DAG") != NULL);
             CHECK(strstr(text, "FREQUENCY COUNTER ANALYSIS REPORT") != NULL);
-            CHECK(strstr(text, "Registry: 20 analyses") != NULL);
+            CHECK(strstr(text, "Registry: 21 analyses") != NULL);
             CHECK(strstr(text, "schema: fc_dataset.json") != NULL);
             CHECK(strstr(text, "Rayleigh") != NULL ||
                   strstr(text, "Measurement blocks") != NULL);
@@ -5875,6 +6022,7 @@ int main(void)
     test_streambuf();
     test_renderbuf();
     test_dagcore();
+    test_fcdrift();
     test_fclattice();
     test_fclk();
     test_fcdataset();

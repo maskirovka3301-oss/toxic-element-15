@@ -199,6 +199,30 @@ case):
 * **Summary**: the best spacing per block with a rose phase histogram and
   a lattice comb plot rendered into the report.
 
+### Device warm-up drift correction
+
+Before the lattice analyses, an optional `drift-correction` DAG node (on by
+default, toggled like every analysis in the Settings checkboxes) estimates
+the warm-up drift of the frequency counter separately for every round of
+every session, using the device-warm-up model from the time-and-frequency
+literature: the oscillator approaches its settled frequency along an
+exponential (optionally fast + slow double-exponential thermal transient),
+f(t) = f_inf + A*exp(-t/tau), with the 95 % settling time t95 = tau*ln(20)
+(~3 tau). The fit is robust (IRLS, Huber weights) and uses variable
+projection (grid search over tau with linear least squares for the
+amplitudes); constant / linear / exponential / double-exponential models
+are selected by BIC. Rounds whose drift is smaller than the noise are left
+uncorrected. The corrected series (transient subtracted, settled level
+kept) replace the raw measurements for all subsequent analyses, and the
+per-round fits are pooled across all rounds and datasets (robust medians)
+to report the device time constant, settling time and typical peak drift.
+
+Per-measurement timestamps (seconds relative to the video start) are not in
+the current schema: the sample index is used as the time base
+(uniform-cadence proxy) and `fcdrift.h` exposes `fcd_timestamps_available()`
+/ `fcd_round_times()` as the stub that will switch the fitter to seconds
+once the schema carries them.
+
 ### K-subcarrier averaging and spacing synthesis
 
 A second analysis chain tests whether the measurements are equal-weight
@@ -221,6 +245,39 @@ no subcarrier clustering was found, the mixture fit when no
 induced-lattice clustering was detected, the CF slope when the K=1
 residual dispersion cannot serve as a single-subcarrier reference, and the
 MDL node always (no signal data).
+
+The peak strip shows the mean spectrum of the waterfall pixel rows that
+are on screen, averaged over up to 128 evenly spaced rows fetched from the
+render buffer through the same row mapping the renderer uses (so its peaks
+match the visible data). It has a dB axis on its left: tick labels are calculated from
+the allowed dB range (the same -150..0 dB domain the sliders use, with a
+"nice" step of 5/10/20/25/50 dB). The areas of the plot outside the
+selected min..max dB window are shaded 50 % opaque blue over the finished
+plot (plot area only, so the axis labels stay readable). Unlike the
+waterfall colour scheme, the shading follows the sliders immediately while
+they are dragged (it is redrawn on every value change); the colour scheme
+still commits only when the slider is released. The bottom toolbar shows a "zoomed
+bandwidth" read-out under the "selected bandwidth" label, reflecting the
+bandwidth of the peak view's zoom window.
+
+The waterfall's dynamic range (the Min dB / Max dB sliders) maps the
+viridis colour scheme — used exactly as defined, no copy is modified —
+onto the selected dB window: for every raw dB value read from the render
+buffer the renderer computes (db - min)/(max - min), clamps it to [0,1]
+and looks up the base colour scheme. The render buffer itself is never
+transformed. While a slider is dragged the waterfall keeps the previously
+committed window (a full repaint happens only on release, or when Auto is
+toggled); the peak view's out-of-range shading, in contrast, follows the
+sliders live.
+
+The waterfall marks the current playback position with a red horizontal
+line (plus a small right-edge marker): the playhead is the stream's leading
+edge, advances with playback, stays where it is when the user scrolls or
+pauses, and is only drawn while it falls inside the visible time span. The
+peak strip mirrors the first row of waterfall pixels: `update_peak_spectrum()` fetches the top
+row through `wf_row_frame()`/`rb_row()` from the render buffer, so the strip
+and the top pixel row always show the same data (falling back to the cached
+mean spectrum only when the render buffer is not ready).
 
 Transient notices shown in the bottom-right status label of the Spectrum
 toolbar (saved reports, selection warnings, buffer summaries, ...) expire
