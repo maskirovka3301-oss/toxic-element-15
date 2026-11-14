@@ -198,6 +198,12 @@ case):
   uniform null).
 * **Silverman** critical-bandwidth bootstrap for multimodality
   (Hartigan's dip is not implemented in this build).
+* **Dataset selection**: every dataset row in the tree has a checkbox
+  before the expander arrow (checked when the dataset is added). Only the
+  checked datasets are copied into the analysis snapshot, so unchecked
+  datasets are left out of the DAG; the Settings "Analysis scope" radio
+  reads "Analyze selected datasets separately" (per checked dataset) or
+  merges the checked datasets into one list.
 * **Multiple testing**: Benjamini-Hochberg and Bonferroni correction per
   test family with the rejection counts.
 * **Summary**: the best spacing per block with a rose phase histogram and

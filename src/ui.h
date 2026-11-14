@@ -22,6 +22,9 @@
 #include "fcdataset.h"
 #include "lte_uplink.h"
 #include "renderbuf.h"
+
+/* datasets that can carry an "analyze" checkbox in the Frequency Counter */
+#define FC_MAX_DATASETS 64
 #include "analysis.h"
 #include "audio.h"
 #include "colormap.h"
@@ -325,6 +328,8 @@ typedef struct Ui {
     GtkWidget *freq_counter_page;   /* second main tab                  */
     /* --- Frequency Counter: measurement sessions + analysis --- */
     FcDatasetList fc_datasets;       /* loaded measurement datasets     */
+    /* per-dataset "analyze this dataset" checkboxes (true for new datasets) */
+    bool          fc_dataset_analyze[FC_MAX_DATASETS];
     GtkWidget  *fc_view;             /* dataset/session tree (GtkTreeView) */
     GtkTreeStore *fc_model;          /* its model                       */
     GtkWidget  *fc_details_view;     /* schema details of the selection */

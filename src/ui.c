@@ -6769,6 +6769,9 @@ void ui_init(Ui *ui, IqSource *src, WaterfallCache *cache)
     ui->peak_db_hi = -20.0;
     ui->stream_buffer_fraction = 1.0 / 8.0;
     fcd_list_init(&ui->fc_datasets);
+    for (size_t i = 0; i < FC_MAX_DATASETS; i++) {
+        ui->fc_dataset_analyze[i] = true;
+    }
     for (size_t i = 0; i < FC_MAX_NODES; i++) ui->fc_node_enabled[i] = true;
     ui->fc_node_check_count = 0;
     ui->streambuf = sb_create(cache, ui->stream_buffer_fraction);
@@ -7764,6 +7767,7 @@ enum {
     FC_T_ROUND,         /* round index inside the session              */
     FC_T_SUBJECT,       /* subject index inside the round              */
     FC_T_KIND,          /* FcNodeKind                                  */
+    FC_T_ANALYZE,       /* dataset "analyse" checkbox state            */
     FC_T_COUNT
 };
 
@@ -8044,7 +8048,85 @@ static void fc_tree_append(Ui *ui, GtkTreeIter *it, GtkTreeIter *parent,
                        FC_T_DETAILS, details, FC_T_MEAS,
                        (int)(measurements > 999999 ? 999999 : measurements),
                        FC_T_KIND, kind, FC_T_DATASET, di, FC_T_SESSION, si,
-                       FC_T_ROUND, ri, FC_T_SUBJECT, ji, -1);
+                       FC_T_ROUND, ri, FC_T_SUBJECT, ji, FC_T_ANALYZE,
+                       kind == FC_KIND_DATASET && di >= 0 &&
+                           di < FC_MAX_DATASETS &&
+                           ui->fc_dataset_analyze[di], -1);
+}
+
+/* Per-dataset "analyze" checkbox: toggling it marks the dataset included
+ * or excluded from the next Analyze run. */
+static gboolean on_fc_dataset_toggled(GtkCellRendererToggle *renderer,
+                                      char *path, gpointer user_data)
+{
+    Ui *ui = (Ui *)user_data;
+    GtkTreeIter it;
+    GtkTreePath *tp = gtk_tree_path_new_from_string(path);
+    int kind = -1, di = -1;
+    gboolean active = FALSE;
+
+    (void)renderer;
+    if (tp == NULL) return FALSE;
+    if (!gtk_tree_model_get_iter(GTK_TREE_MODEL(ui->fc_model), &it, tp)) {
+        gtk_tree_path_free(tp);
+        return FALSE;
+    }
+    gtk_tree_path_free(tp);
+    gtk_tree_model_get(GTK_TREE_MODEL(ui->fc_model), &it, FC_T_KIND, &kind,
+                       FC_T_DATASET, &di, -1);
+    if (kind != FC_KIND_DATASET || di < 0 || di >= FC_MAX_DATASETS) {
+        return FALSE;
+    }
+    gtk_tree_model_get(GTK_TREE_MODEL(ui->fc_model), &it, FC_T_ANALYZE,
+                       &active, -1);
+    active = active ? FALSE : TRUE;
+    ui->fc_dataset_analyze[di] = active != FALSE;
+    gtk_tree_store_set(ui->fc_model, &it, FC_T_ANALYZE, active, -1);
+    if (ui->fc_status_label != NULL) {
+        size_t selected = 0;
+
+        for (size_t i = 0; i < ui->fc_datasets.count &&
+                           i < FC_MAX_DATASETS; i++) {
+            if (ui->fc_dataset_analyze[i]) selected++;
+        }
+        {
+            char msg[256];
+
+            snprintf(msg, sizeof(msg), "%zu of %zu dataset%s selected for "
+                     "analysis.", selected, ui->fc_datasets.count,
+                     ui->fc_datasets.count == 1 ? "" : "s");
+            gtk_label_set_text(GTK_LABEL(ui->fc_status_label), msg);
+        }
+    }
+    return TRUE;
+}
+
+/* Clone the loaded datasets, keeping only the ones whose checkbox is
+ * checked (owning copy for the worker). Returns false on allocation
+ * failure. */
+static bool fc_analyze_snapshot(Ui *ui, FcDatasetList *out)
+{
+    if (!fcd_list_clone(&ui->fc_datasets, out)) return false;
+    for (size_t i = out->count; i > 0; i--) {
+        size_t idx = i - 1;
+
+        if (idx < FC_MAX_DATASETS && !ui->fc_dataset_analyze[idx]) {
+            fcd_list_remove(out, idx);
+        }
+    }
+    return true;
+}
+
+/* Count the datasets whose checkbox is checked. */
+static size_t fc_analyze_selected(const Ui *ui)
+{
+    size_t selected = 0;
+
+    for (size_t i = 0; i < ui->fc_datasets.count && i < FC_MAX_DATASETS;
+         i++) {
+        if (ui->fc_dataset_analyze[i]) selected++;
+    }
+    return selected;
 }
 
 static void fc_tree_build(Ui *ui, const char *filter)
@@ -8262,6 +8344,9 @@ static void fc_load_paths(Ui *ui, char *const *paths, size_t n_paths)
         char err[512] = "";
 
         if (fcd_load_file(&ui->fc_datasets, paths[i], err, sizeof(err))) {
+            size_t idx = ui->fc_datasets.count - 1;
+
+            if (idx < FC_MAX_DATASETS) ui->fc_dataset_analyze[idx] = true;
             loaded++;
         } else {
             snprintf(last_err, sizeof(last_err), "%s", err);
@@ -8408,6 +8493,15 @@ static void on_fc_remove_clicked(GtkButton *button, gpointer user_data)
     (void)button;
     if (!fc_selection(ui, &kind, &di, &si, &ri, &ji) || di < 0) return;
     fcd_list_remove(&ui->fc_datasets, (size_t)di);
+    if ((size_t)di < FC_MAX_DATASETS) {
+        for (size_t i = (size_t)di; i + 1 < ui->fc_datasets.count + 1 &&
+                               i + 1 < FC_MAX_DATASETS; i++) {
+            ui->fc_dataset_analyze[i] = ui->fc_dataset_analyze[i + 1];
+        }
+        if (ui->fc_datasets.count < FC_MAX_DATASETS) {
+            ui->fc_dataset_analyze[ui->fc_datasets.count] = true;
+        }
+    }
     fc_rebuild(ui, false);
     fc_show_details(ui);
     if (ui->fc_status_label != NULL) {
@@ -8425,6 +8519,9 @@ static void on_fc_remove_all_clicked(GtkButton *button, gpointer user_data)
 
     (void)button;
     fcd_list_clear(&ui->fc_datasets);
+    for (size_t i = 0; i < FC_MAX_DATASETS; i++) {
+        ui->fc_dataset_analyze[i] = true;
+    }
     fc_rebuild(ui, false);
     fc_show_details(ui);
     gtk_label_set_text(GTK_LABEL(ui->fc_status_label), "All datasets removed.");
@@ -8575,7 +8672,14 @@ static void on_fc_analyze_clicked(GtkButton *button, gpointer user_data)
         }
         job->n_enabled_nodes = n;
     }
-    if (!fcd_list_clone(&ui->fc_datasets, &job->snapshot)) {
+    if (fc_analyze_selected(ui) == 0) {
+        free(job);
+        gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
+                           "No dataset is selected for analysis: check at "
+                           "least one dataset in the tree.");
+        return;
+    }
+    if (!fc_analyze_snapshot(ui, &job->snapshot)) {
         fcd_list_clear(&job->snapshot);
         free(job);
         gtk_label_set_text(GTK_LABEL(ui->fc_status_label),
@@ -8590,11 +8694,14 @@ static void on_fc_analyze_clicked(GtkButton *button, gpointer user_data)
     {
         char text[256];
 
+        size_t selected = fc_analyze_selected(ui);
+
         snprintf(text, sizeof(text),
-                 "Running the analysis DAG over %zu dataset%s (%zu "
-                 "measurements), scope: %s…", ui->fc_datasets.count,
+                 "Running the analysis DAG over %zu of %zu dataset%s (%zu "
+                 "measurements), scope: %s…", selected,
+                 ui->fc_datasets.count,
                  ui->fc_datasets.count == 1 ? "" : "s",
-                 fcd_list_count_measurements(&ui->fc_datasets),
+                 fcd_list_count_measurements(&job->snapshot),
                  fcl_scope_name((FclScope)ui->fc_scope));
         gtk_label_set_text(GTK_LABEL(ui->fc_status_label), text);
     }
@@ -8741,24 +8848,46 @@ static GtkWidget *build_fc_left_panel(Ui *ui)
     ui->fc_model = gtk_tree_store_new(FC_T_COUNT, G_TYPE_STRING,
                                       G_TYPE_STRING, G_TYPE_STRING,
                                       G_TYPE_INT, G_TYPE_INT, G_TYPE_INT,
-                                      G_TYPE_INT, G_TYPE_INT, G_TYPE_INT);
+                                      G_TYPE_INT, G_TYPE_INT, G_TYPE_INT,
+                                      G_TYPE_BOOLEAN);
     ui->fc_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(ui->fc_model));
     gtk_tree_view_set_headers_visible(GTK_TREE_VIEW(ui->fc_view), TRUE);
     {
-        static const char *titles[4] = { "Item", "ID / name", "Details",
-                                         "Meas." };
+        GtkWidget *tv = ui->fc_view;
+        GtkTreeViewColumn *item_col = NULL;
+        GtkCellRenderer *tog = gtk_cell_renderer_toggle_new();
+        GtkTreeViewColumn *tog_col;
 
-        for (int i = 0; i < 4; i++) {
-            GtkCellRenderer *r = gtk_cell_renderer_text_new();
-            GtkTreeViewColumn *c = gtk_tree_view_column_new_with_attributes(
-                titles[i], r, "text", i, NULL);
+        /* "analyze this dataset" checkbox, before the expander arrow */
+        g_signal_connect(tog, "toggled",
+                         G_CALLBACK(on_fc_dataset_toggled), ui);
+        tog_col = gtk_tree_view_column_new_with_attributes(
+            "", tog, "active", FC_T_ANALYZE, NULL);
+        gtk_tree_view_column_set_clickable(tog_col, FALSE);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(tv), tog_col);
+        {
+            static const char *titles[4] = { "Item", "ID / name", "Details",
+                                             "Meas." };
 
-            if (i == 2) {
-                g_object_set(r, "ellipsize", PANGO_ELLIPSIZE_END, NULL);
-                gtk_tree_view_column_set_expand(c, TRUE);
+            for (int i = 0; i < 4; i++) {
+                GtkCellRenderer *r = gtk_cell_renderer_text_new();
+                GtkTreeViewColumn *c =
+                    gtk_tree_view_column_new_with_attributes(titles[i], r,
+                                                             "text", i, NULL);
+
+                if (i == 2) {
+                    g_object_set(r, "ellipsize", PANGO_ELLIPSIZE_END, NULL);
+                    gtk_tree_view_column_set_expand(c, TRUE);
+                }
+                gtk_tree_view_column_set_resizable(c, TRUE);
+                gtk_tree_view_append_column(GTK_TREE_VIEW(tv), c);
+                if (i == 0) item_col = c;
             }
-            gtk_tree_view_column_set_resizable(c, TRUE);
-            gtk_tree_view_append_column(GTK_TREE_VIEW(ui->fc_view), c);
+        }
+        /* the expander (">") is drawn in the Item column, i.e. to the right
+         * of the checkbox */
+        if (item_col != NULL) {
+            gtk_tree_view_set_expander_column(GTK_TREE_VIEW(tv), item_col);
         }
     }
     gtk_widget_set_size_request(ui->fc_view, -1, 220);
@@ -8866,7 +8995,7 @@ static GtkWidget *build_fc_settings_page(Ui *ui)
     gtk_widget_set_margin_top(grid, PAGE_MARGIN);
     gtk_widget_set_margin_bottom(grid, PAGE_MARGIN);
     radio_per = gtk_radio_button_new_with_label(
-        NULL, "Analyse every dataset separately");
+        NULL, "Analyze selected datasets separately");
     radio_merged = gtk_radio_button_new_with_label_from_widget(
         GTK_RADIO_BUTTON(radio_per),
         "Merge all datasets into one measurement list");
@@ -8885,9 +9014,10 @@ static GtkWidget *build_fc_settings_page(Ui *ui)
     {
         GtkWidget *hint = gtk_label_new(
             "Per dataset: each session round (all subjects combined) and each "
-            "subject is analysed separately. Merged: all measurements of all "
-            "loaded datasets form one list and all analyses run once on that "
-            "list.");
+            "subject of the checked datasets is analysed separately. Merged: "
+            "all measurements of the checked datasets form one list and all "
+            "analyses run once on that list. Use the checkboxes in the "
+            "dataset tree to choose which datasets are analysed.");
         GtkWidget *hint2 = gtk_label_new(
             "The choice applies to the next Analyze run; the report states "
             "which scope was used.");
@@ -9035,6 +9165,9 @@ static GtkWidget *build_freq_counter_page(Ui *ui)
     GtkWidget *settings_page;
 
     fcd_list_init(&ui->fc_datasets);
+    for (size_t i = 0; i < FC_MAX_DATASETS; i++) {
+        ui->fc_dataset_analyze[i] = true;
+    }
     for (size_t i = 0; i < FC_MAX_NODES; i++) ui->fc_node_enabled[i] = true;
     ui->fc_node_check_count = 0;
     analysis_page = build_fc_analysis_page(ui);
