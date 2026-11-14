@@ -9904,7 +9904,7 @@ static void on_fc_csv_export_clicked(GtkButton *button, gpointer user_data)
 
                 snprintf(msg, sizeof(msg),
                          "Exported the selected measurements as CSV (one "
-                         "row per %s) to %s",
+                         "row per measurement, labelled per %s) to %s",
                          fc_csv_granularity_name(gran), filename);
                 gtk_label_set_text(GTK_LABEL(ui->fc_status_label), msg);
             }

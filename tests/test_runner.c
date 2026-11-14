@@ -5688,12 +5688,13 @@ static void test_fc_csv_export(void)
             if (*p == '\n') rows++;
         }
         printf("  round CSV rows (incl. header): %zu\n", rows);
-        CHECK(strstr(csv, "dataset,session,round,frequency_lists,"
-                          "measurements,mean_hz") != NULL);
-        CHECK(rows == 4);               /* header + 3 rounds */
-        CHECK(strstr(csv, "1.500000") != NULL);   /* r1: 1, 2 */
-        CHECK(strstr(csv, "4.500000") != NULL);   /* r2: 4, 5 */
-        CHECK(strstr(csv, "6.000000") != NULL);   /* session 2 round */
+        CHECK(strstr(csv, "dataset,session,round,frequency_list,index,"
+                          "measurement_hz") != NULL);
+        CHECK(rows == 6);               /* header + 5 measurements */
+        CHECK(strstr(csv, "CSV test,1,r1,a,1,1.000000") != NULL);
+        CHECK(strstr(csv, "CSV test,1,r2,c,1,4.000000") != NULL);
+        CHECK(strstr(csv, "CSV test,1,r2,c,2,5.000000") != NULL);
+        CHECK(strstr(csv, "CSV test,2,r1,d,1,6.000000") != NULL);
         free(csv);
     }
     csv = fc_csv_export(&list, FC_CSV_SESSION);
@@ -5704,9 +5705,11 @@ static void test_fc_csv_export(void)
             if (*p == '\n') rows++;
         }
         printf("  session CSV rows (incl. header): %zu\n", rows);
-        CHECK(strstr(csv, "dataset,session,frequency_lists") != NULL);
-        CHECK(rows == 3);               /* header + 2 sessions */
-        CHECK(strstr(csv, "3.000000") != NULL);   /* s1: 1,2,4,5 */
+        CHECK(strstr(csv, "dataset,session,frequency_list,index,"
+                          "measurement_hz") != NULL);
+        CHECK(rows == 6);               /* header + 5 measurements */
+        CHECK(strstr(csv, "CSV test,1,a,1,1.000000") != NULL);
+        CHECK(strstr(csv, "CSV test,2,d,1,6.000000") != NULL);
         free(csv);
     }
     csv = fc_csv_export(&list, FC_CSV_DATASET);
@@ -5717,9 +5720,11 @@ static void test_fc_csv_export(void)
             if (*p == '\n') rows++;
         }
         printf("  dataset CSV rows (incl. header): %zu\n", rows);
-        CHECK(strstr(csv, "dataset,frequency_lists") != NULL);
-        CHECK(rows == 2);               /* header + 1 dataset */
-        CHECK(strstr(csv, "3.600000") != NULL);   /* 1,2,4,5,6 */
+        CHECK(strstr(csv, "dataset,frequency_list,index,measurement_hz") !=
+              NULL);
+        CHECK(rows == 6);               /* header + 5 measurements */
+        CHECK(strstr(csv, "CSV test,a,1,1.000000") != NULL);
+        CHECK(strstr(csv, "CSV test,d,1,6.000000") != NULL);
         free(csv);
     }
     fcd_list_clear(&list);

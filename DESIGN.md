@@ -300,16 +300,23 @@ MDL node always (no signal data).
 ### CSV export
 
 The Frequency Counter toolbar has a CSV export control: the "CSV rows"
-combo chooses whether the exported table has one row per selected **round**,
-per selected **session** or per selected **dataset**, and "Export CSV…"
-writes the file. The export uses the same selection as the analyses (only
-checked datasets and checked frequency lists are included); each row holds
-the identity columns (dataset, and session/round when applicable), the
-number of frequency lists, the number of measurements and the descriptive
-statistics of the values in Hz (mean, standard deviation, minimum, median,
-maximum). Rows without measurements are omitted; fields are CSV-quoted when
-needed. The generator lives in `fcexport.c` (`fc_csv_export()`), separate
-from GTK so it is unit-tested.
+combo chooses whether the rows are labelled per selected **round**, per
+selected **session** or per selected **dataset**, and "Export CSV…" writes
+the file. The export contains the ACTUAL MEASUREMENTS — one row per
+measurement, not aggregated statistics — of the checked datasets and
+checked frequency lists only. Identity columns depend on the chosen
+granularity:
+
+  round:   dataset,session,round,frequency_list,index,measurement_hz
+  session: dataset,session,frequency_list,index,measurement_hz
+  dataset: dataset,frequency_list,index,measurement_hz
+
+`index` is the 1-based position inside the frequency list and
+`measurement_hz` the measured value. Dataset-level unassigned measurements
+are exported with empty session/round fields and the frequency-list name
+"unassigned". Rows are written in stored order (dataset, session, round,
+list, measurement); fields are CSV-quoted when needed. The generator lives
+in `fcexport.c` (`fc_csv_export()`), separate from GTK so it is unit-tested.
 
 ### Statistics tab
 
