@@ -1,3 +1,3 @@
 # Toxic Element 15
 
-![User Interface](media/screenshot.jpg?raw=true "User Interface")
+![User Interface](media/screenshot.png?raw=true "User Interface")
