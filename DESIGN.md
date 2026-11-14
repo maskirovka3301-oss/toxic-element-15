@@ -198,12 +198,16 @@ case):
   uniform null).
 * **Silverman** critical-bandwidth bootstrap for multimodality
   (Hartigan's dip is not implemented in this build).
-* **Dataset / session / round selection**: every dataset root row, session
-  row and round row in the tree has a checkbox before the expander arrow
-  (all checked when data is added). The session box switches all rounds of
-  that session; the Analyze run copies only the checked datasets and rounds
-  into the worker snapshot, so unchecked datasets and rounds are left out of
-  the DAG; the Settings "Analysis scope" radio
+* **Dataset / session / round / frequency-list selection**: every dataset
+  root row, session row, round row and frequency-list (subject) row in the
+  tree has a checkbox before the expander arrow (all checked when data is
+  added). A session box switches all frequency lists of its rounds, a round
+  box switches all frequency lists of that round, and a frequency-list box
+  switches just that list; parent rows show whether everything below them
+  is checked. The Analyze run copies only the checked datasets, rounds and
+  frequency lists into the worker snapshot (`fcd_remove_subject()` /
+  `fcd_remove_round()` drop unchecked entries), so unchecked data is left
+  out of the DAG; the Settings "Analysis scope" radio
   reads "Analyze selected datasets separately" (per checked dataset) or
   merges the checked datasets into one list.
 * **Multiple testing**: Benjamini-Hochberg and Bonferroni correction per

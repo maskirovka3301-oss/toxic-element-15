@@ -675,6 +675,26 @@ bool fcd_remove_round(FcDataset *ds, size_t si, size_t ri)
     return true;
 }
 
+/* Remove one frequency list (subject) from a round and free it. Returns
+ * false when the indices are out of range. */
+bool fcd_remove_subject(FcDataset *ds, size_t si, size_t ri, size_t ji)
+{
+    FcRound *rr;
+
+    if (ds == NULL || si >= ds->n_sessions) return false;
+    if (ri >= ds->sessions[si].n_rounds) return false;
+    rr = &ds->sessions[si].rounds[ri];
+    if (ji >= rr->n_subjects) return false;
+    subject_free(&rr->subjects[ji]);
+    if (ji + 1 < rr->n_subjects) {
+        memmove(&rr->subjects[ji], &rr->subjects[ji + 1],
+                (rr->n_subjects - ji - 1) * sizeof(*rr->subjects));
+    }
+    rr->n_subjects--;
+    memset(&rr->subjects[rr->n_subjects], 0, sizeof(*rr->subjects));
+    return true;
+}
+
 /* ------------------------------------------------------------------ */
 /* deep copy                                                          */
 /* ------------------------------------------------------------------ */

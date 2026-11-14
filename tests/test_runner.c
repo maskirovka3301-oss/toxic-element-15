@@ -5165,6 +5165,40 @@ static void test_fcdataset(void)
             fcd_list_clear(&b);
         }
     }
+    /* removing individual rounds and frequency lists from a dataset */
+    {
+        static const char *json =
+            "{ \"dataset_id\": \"rm\", \"source_file\": \"rm.csv\", "
+            "\"title\": \"Removal test\", \"notes\": [], \"sessions\": [ "
+            "{ \"session_id\": 1, \"rounds\": [ { \"round_id\": \"r1\", "
+            "\"location\": null, \"date\": null, \"coordinates\": null, "
+            "\"closest_towers_enb_ids\": null, \"context\": null, "
+            "\"subjects_listed\": [], \"subjects\": [ "
+            "{\"name\": \"a\", \"measurements\": [1.0, 2.0]}, "
+            "{\"name\": \"b\", \"measurements\": [3.0]} ] }, "
+            "{ \"round_id\": \"r2\", \"location\": null, \"date\": null, "
+            "\"coordinates\": null, \"closest_towers_enb_ids\": null, "
+            "\"context\": null, \"subjects_listed\": [], \"subjects\": [ "
+            "{\"name\": \"c\", \"measurements\": [4.0]} ] } ] } ] }";
+        FcDatasetList t;
+
+        fcd_list_init(&t);
+        err[0] = '\0';
+        CHECK(load_temp_dataset(&t, json, path, err, sizeof(err)));
+        CHECK(t.count == 1);
+        if (t.count == 1) {
+            CHECK(fcd_count_rounds(&t.items[0]) == 2);
+            CHECK(fcd_count_measurements(&t.items[0]) == 4);
+            CHECK(fcd_remove_subject(&t.items[0], 0, 0, 0));
+            CHECK(fcd_count_measurements(&t.items[0]) == 2);
+            CHECK(!fcd_remove_subject(&t.items[0], 0, 0, 5));
+            CHECK(fcd_remove_round(&t.items[0], 0, 0));
+            CHECK(fcd_count_rounds(&t.items[0]) == 1);
+            CHECK(fcd_count_measurements(&t.items[0]) == 1);
+            CHECK(!fcd_remove_round(&t.items[0], 0, 7));
+        }
+        fcd_list_clear(&t);
+    }
     fcd_list_remove(&list, 0);
     CHECK(list.count == 0);
     fcd_list_remove(&list, 9);   /* out of range: ignored */

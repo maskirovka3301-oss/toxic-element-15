@@ -96,6 +96,10 @@ void fcd_list_remove(FcDatasetList *list, size_t index);
  * Returns false when the indices are out of range. */
 bool fcd_remove_round(FcDataset *dataset, size_t si, size_t ri);
 
+/* Remove one frequency list (subject, index ji) from a round and free it.
+ * Returns false when the indices are out of range. */
+bool fcd_remove_subject(FcDataset *dataset, size_t si, size_t ri, size_t ji);
+
 /* Totals over one dataset / the whole list. */
 size_t fcd_count_rounds(const FcDataset *dataset);
 size_t fcd_count_subjects(const FcDataset *dataset);

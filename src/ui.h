@@ -333,6 +333,10 @@ typedef struct Ui {
     /* per-round "analyze" flags, flat dataset -> session -> round order */
     bool         *fc_round_analyze;
     size_t        fc_round_flags_capacity;
+    /* per-frequency-list (subject) "analyze" flags, flat
+     * dataset -> session -> round -> subject order */
+    bool         *fc_subject_analyze;
+    size_t        fc_subject_flags_capacity;
     GtkWidget  *fc_view;             /* dataset/session tree (GtkTreeView) */
     GtkTreeStore *fc_model;          /* its model                       */
     GtkWidget  *fc_details_view;     /* schema details of the selection */
