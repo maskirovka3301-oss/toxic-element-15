@@ -984,6 +984,77 @@ static void test_lte_uplink_bands(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* candidate-first DAG: pre-selection and modulation filtering         */
+/* ------------------------------------------------------------------ */
+
+static void test_signals_preselect_filter(void)
+{
+    SignalMatch ps[24], fl[16];
+    size_t n, nf;
+
+    puts("\n-- candidate pre-selection / modulation filter --");
+    /* 2535.79 MHz / 333.9 kHz: Band 7 uplink and Band 41/n41 are possible
+     * from the centre frequency and bandwidth alone, before any analysis */
+    n = signals_preselect(2535.789649e6, 333889.0, ps, 24);
+    printf("  pre-selected at 2535.79 MHz: %zu\n", n);
+    CHECK(n >= 8);
+    CHECK(strstr(ps[0].signal->name, "B7") != NULL ||
+          strstr(ps[0].signal->name, "n7") != NULL);
+    for (size_t i = 0; i < n; i++) {
+        CHECK(ps[i].signal->freq_min <= 2535.789649e6);
+        CHECK(ps[i].signal->freq_max >= 2535.789649e6);
+    }
+    nf = signals_filter_family(ps, n, SIG_FAM_OFDM, fl, 16);
+    printf("  filtered to OFDM: %zu\n", nf);
+    CHECK(nf >= 8);
+    for (size_t i = 0; i < nf; i++) {
+        CHECK(fl[i].signal->family == SIG_FAM_OFDM ||
+              fl[i].signal->family == SIG_FAM_UNKNOWN);
+    }
+    {
+        int have_b7 = 0, have_b41 = 0;
+
+        for (size_t i = 0; i < nf; i++) {
+            if (strstr(fl[i].signal->name, "PUSCH B7") != NULL) have_b7 = 1;
+            if (strstr(fl[i].signal->name, "B41") != NULL) have_b41 = 1;
+        }
+        CHECK(have_b7);
+        CHECK(have_b41);
+    }
+    /* a modulation family that none of the bands supports filters to zero,
+     * which is the "run the rest of the analyses" decision */
+    nf = signals_filter_family(ps, n, SIG_FAM_OOK, fl, 16);
+    CHECK(nf == 0);
+
+    /* the synthetic 100 MHz fixture only admits the FM broadcast band */
+    n = signals_preselect(100e6, 200e3, ps, 24);
+    printf("  pre-selected at 100 MHz / 200 kHz: %zu\n", n);
+    CHECK(n >= 1);
+    CHECK(strstr(ps[0].signal->name, "FM") != NULL);
+}
+
+static void test_spectrum_dag_order(void)
+{
+    puts("\n-- Spectrum DAG candidate-first order --");
+    CHECK(dag_node_count() == 16);
+    CHECK(strcmp(dag_node_name(DAG_SOT), "SOT common source") == 0);
+    CHECK(strstr(dag_node_name(DAG_CANDIDATES),
+                 "Candidate pre-selection") != NULL);
+    CHECK(strstr(dag_node_name(DAG_A0), "baseline") != NULL);
+    CHECK(strstr(dag_node_name(DAG_MODULATION),
+                 "Modulation determination") != NULL);
+    CHECK(strstr(dag_node_name(DAG_FILTER), "Candidate filtering") != NULL);
+    CHECK(strstr(dag_node_name(DAG_A1), "classic") != NULL);
+    CHECK(strstr(dag_node_name(DAG_MODCONF), "modulation consensus") != NULL);
+    CHECK(strstr(dag_node_name(DAG_SSCLASS), "spread-spectrum") != NULL);
+    CHECK(aregistry_find("candidates") != NULL);
+    CHECK(aregistry_find("modulation") != NULL);
+    CHECK(aregistry_find("filter") != NULL);
+    CHECK(aregistry_find("sot") != NULL);
+    CHECK(aregistry_find("signals") != NULL);
+}
+
+/* ------------------------------------------------------------------ */
 /* signal detection                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -6761,6 +6832,7 @@ int main(void)
     test_bins_to_db();
     test_spectrum();
     test_signals();
+    test_signals_preselect_filter();
     test_iq_source();
     test_iq_formats();
     test_wav();
@@ -6800,6 +6872,7 @@ int main(void)
     test_streambuf();
     test_renderbuf();
     test_dagcore();
+    test_spectrum_dag_order();
     test_fcdrift();
     test_fclattice();
     test_fclk();

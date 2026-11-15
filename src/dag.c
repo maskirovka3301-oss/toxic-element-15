@@ -7,9 +7,12 @@
 #include <string.h>
 
 static const DagCoreNodeSpec dag_specs[DAG_NODES] = {
-    { "a0-baseline", "A0 baseline analysis", NULL },
     { "sot", "SOT common source", NULL },
-    { "a1-classic", "A1 classic analysis", NULL },
+    { "candidates", "Candidate pre-selection (frequency + bandwidth)", NULL },
+    { "a0-baseline", "A0 baseline analysis", NULL },
+    { "modulation", "Modulation determination", NULL },
+    { "filter", "Candidate filtering + DAG decision", NULL },
+    { "a1-classic", "A1 classic analysis (least specialised)", NULL },
     { "a2-pulse", "A2 pulse-train analysis", NULL },
     { "a3-hos", "A3 higher-order statistics", NULL },
     { "a4-fam", "A4 FAM spectral correlation", NULL },

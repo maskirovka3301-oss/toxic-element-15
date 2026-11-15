@@ -2193,6 +2193,20 @@ static gpointer report_worker(gpointer data)
     /* DAG decision outcomes (recorded for the report) */
     bool d4_have_cf = false, d5_no_cycles = false, d6_wideband = false;
     bool validated_cycles = false;
+    /* candidate-first identification flow (new DAG order):
+     * SOT -> candidates -> A0 -> modulation -> filter -> [rest if needed] */
+    SignalMatch preselect[24];
+    SignalMatch filtered[16];
+    size_t n_preselect = 0, n_filtered = 0;
+    bool mod_reliable = false;
+    int mod_family = -1;
+    int mod_family_conf = 0;
+    const char *mod_family_name = "unknown";
+    bool rest_warranted = true;
+    char rest_reason[256];
+    const char *preselect_names[16];
+    const char *filtered_names[16];
+    size_t n_preselect_names = 0, n_filtered_names = 0;
 
     memset(&analysis, 0, sizeof(analysis));
     memset(&metrics, 0, sizeof(metrics));
@@ -2219,6 +2233,34 @@ static gpointer report_worker(gpointer data)
     const IqSource *s = src;
 
     memset(&sot, 0, sizeof(sot));
+    /* --- candidate pre-selection (BEFORE any analysis) -----------------
+     * Only the measured centre frequency and the approximate bandwidth of
+     * the user's selection are used: every database entry whose licensed
+     * range contains the centre and whose documented channel/occupied
+     * width is compatible with the bandwidth is a possible candidate. */
+    {
+        AnalysisResult *ar = node_begin(&envelopes, dag, "candidates",
+                                        DAG_CANDIDATES, &node_t0);
+        double center = 0.5 * (job->region.freq_min + job->region.freq_max);
+        double bw = job->region.freq_max - job->region.freq_min;
+
+        n_preselect = signals_preselect(center, bw, preselect,
+                                        sizeof(preselect) /
+                                            sizeof(preselect[0]));
+        for (size_t i = 0; i < n_preselect &&
+                           i < sizeof(preselect_names) /
+                                   sizeof(preselect_names[0]); i++) {
+            preselect_names[i] = preselect[i].signal->name;
+        }
+        n_preselect_names = n_preselect < 16 ? n_preselect : 16;
+        if (ar != NULL) {
+            ar_num(ar, "n_preselected", (double)n_preselect, NULL,
+                   "band contains centre and width is compatible");
+            ar_num(ar, "bandwidth_hz", bw, "Hz", "approximate selection bandwidth");
+            apub_set_confidence(ar, 1.0);
+        }
+        node_end(ar, dag, DAG_CANDIDATES, node_t0, true, NULL);
+    }
     {
         AnalysisResult *ar = node_begin(&envelopes, dag, "sot", DAG_SOT,
                                         &node_t0);
@@ -2286,15 +2328,118 @@ static gpointer report_worker(gpointer data)
         goto cancelled_out;
     }
 
-    /* --- DAG EXECUTION PHASE ---------------------------------------------
-     * The analyses run per the user-specified DAG:
-     *   A0 -> {A1, A2, A3, D6} -> (A4 | A5) -> A6 -> (A8 | A7)
-     * A0 (the block above) supplies the baseline context; the cheap
-     * exploratory probes A1/A2/A3 run next; their outcomes decide whether
-     * the cycle-frequency search (A4 FAM or A5 SSCA for wideband inputs),
-     * the detector validation stage (A6), the cyclic-cumulant stage (A8)
-     * and the ACF-fluctuation diagnostic (A7) are warranted. Every node
-     * not executed records its rationale for the report. */
+    /* --- modulation determination (candidate-first flow) -----------------
+     * The modulation-family decision uses only A0's measured results:
+     * the classifier label, the metric vector and the modulation-consensus
+     * scores computed from them. It does NOT require any of the deeper
+     * analyses, so the candidate filter can decide whether they are
+     * warranted before any of them runs. */
+    {
+        AnalysisResult *ar = node_begin(&envelopes, dag, "modulation",
+                                        DAG_MODULATION, &node_t0);
+        ModCandidate m0[12];
+        size_t nm = modconf_rank(&analysis, &metrics, &cyclic, &ccc, &hos,
+                                 &pulse, &fluct, &cpar, m0,
+                                 sizeof(m0) / sizeof(m0[0]));
+        int top = nm > 0 ? m0[0].score : 0;
+        int second = nm > 1 ? m0[1].score : 0;
+
+        mod_family = nm > 0 ? signals_family_from_mod_name(m0[0].name) : -1;
+        mod_family_conf = top;
+        switch (mod_family) {
+        case SIG_FAM_AM: mod_family_name = "AM"; break;
+        case SIG_FAM_FM: mod_family_name = "FM"; break;
+        case SIG_FAM_CW: mod_family_name = "CW"; break;
+        case SIG_FAM_PSK: mod_family_name = "PSK"; break;
+        case SIG_FAM_FSK: mod_family_name = "FSK"; break;
+        case SIG_FAM_OOK: mod_family_name = "OOK/pulsed"; break;
+        case SIG_FAM_OFDM: mod_family_name = "OFDM/QAM"; break;
+        case SIG_FAM_CHIRP: mod_family_name = "chirp"; break;
+        default: mod_family_name = "unknown"; break;
+        }
+        /* reliable: a decisive family candidate (strong score and a clear
+         * margin over the runner-up) */
+        mod_reliable = nm > 0 && mod_family >= 0 && top >= 70 &&
+                       (top - second) >= 15;
+        if (ar != NULL) {
+            ar_text(ar, "family", mod_family_name, "modulation-family decision");
+            ar_num(ar, "confidence", top, "%", "modulation-consensus score");
+            ar_num(ar, "reliable", mod_reliable ? 1.0 : 0.0, NULL,
+                   "decisive score and margin over the runner-up");
+            ar_num(ar, "n_candidates", (double)nm, NULL,
+                   "modulation candidates considered");
+            apub_set_confidence(ar, top / 100.0);
+        }
+        node_end(ar, dag, DAG_MODULATION, node_t0, nm > 0, NULL);
+        job_advance(job, &done, "modulation determination", &stage_start);
+    }
+    if (job->cancelled) {
+        goto cancelled_out;
+    }
+
+    /* --- candidate filtering + DAG decision ------------------------------ */
+    {
+        AnalysisResult *ar = node_begin(&envelopes, dag, "filter", DAG_FILTER,
+                                        &node_t0);
+        char matched[256];
+
+        n_filtered = signals_filter_family(
+            preselect, n_preselect, mod_reliable ? mod_family : -1, filtered,
+            sizeof(filtered) / sizeof(filtered[0]));
+        for (size_t i = 0; i < n_filtered &&
+                           i < sizeof(filtered_names) /
+                                   sizeof(filtered_names[0]); i++) {
+            filtered_names[i] = filtered[i].signal->name;
+        }
+        n_filtered_names = n_filtered < 16 ? n_filtered : 16;
+        rest_warranted = !mod_reliable || n_filtered == 0;
+        matched[0] = '\0';
+        for (size_t i = 0; i < n_filtered_names; i++) {
+            size_t l = strlen(matched);
+
+            snprintf(matched + l, sizeof(matched) - l, "%s%s",
+                     l ? ", " : "", filtered_names[i]);
+        }
+        if (!mod_reliable) {
+            snprintf(rest_reason, sizeof(rest_reason),
+                     "the modulation could not be determined reliably "
+                     "(best %s at %d %%)", mod_family_name,
+                     mod_family_conf);
+        } else if (n_filtered == 0) {
+            snprintf(rest_reason, sizeof(rest_reason),
+                     "none of the %zu preselected candidates has the "
+                     "detected %s modulation", n_preselect,
+                     mod_family_name);
+        } else {
+            snprintf(rest_reason, sizeof(rest_reason),
+                     "%zu preselected candidate%s match the detected %s "
+                     "modulation", n_filtered, n_filtered == 1 ? "" : "s",
+                     mod_family_name);
+        }
+        if (ar != NULL) {
+            ar_num(ar, "n_matched", (double)n_filtered, NULL,
+                   "preselected candidates with the detected family");
+            ar_num(ar, "rest_warranted", rest_warranted ? 1.0 : 0.0, NULL,
+                   "1 when the remaining DAG must run");
+            ar_text(ar, "matched", matched, "top matching candidate names");
+            ar_text(ar, "reason", rest_reason, "DAG decision rationale");
+            apub_set_confidence(ar, rest_warranted ? 1.0 : 0.0);
+        }
+        node_end(ar, dag, DAG_FILTER, node_t0, true, NULL);
+        job_advance(job, &done, "candidate filtering", &stage_start);
+    }
+    if (job->cancelled) {
+        goto cancelled_out;
+    }
+
+    /* --- REMAINING ANALYSES (only when the filter says they are warranted) -
+     * When the candidate filter is conclusive, the deeper analyses are
+     * skipped (each node records the rationale). When it is inconclusive
+     * they run in increasing specialisation: A1 classic -> A2 pulse ->
+     * A3 HOS -> cycle-frequency search -> detectors -> cumulants/fluct ->
+     * intra-burst. */
+    ran_a1 = false;
+    if (rest_warranted) {
     ran_a1 = true;
     {
         AnalysisResult *ar = node_begin(&envelopes, dag, "classic", DAG_A1,
@@ -2312,20 +2457,40 @@ static gpointer report_worker(gpointer data)
     if (job->cancelled) {
         goto cancelled_out;
     }
-    ran_a2 = true;
     {
-        AnalysisResult *ar = node_begin(&envelopes, dag, "pulse", DAG_A2,
-                                        &node_t0);
+        /* after the least specialised probe, the pulse-train search is only
+         * warranted for a pulsed/bursty or still-unknown signature: a
+         * reliably detected continuous modulation (AM/FM/CW/chirp) makes
+         * envelope segmentation pointless */
+        bool continuous = mod_reliable &&
+                          (mod_family == SIG_FAM_AM ||
+                           mod_family == SIG_FAM_FM ||
+                           mod_family == SIG_FAM_CW ||
+                           mod_family == SIG_FAM_CHIRP);
 
-        ok_pulse = pulse_analyze(s, &sreg, &pulse);
-        if (ar != NULL) {
-            apub_pulse(ar, &pulse);
-            apub_set_confidence(ar, ok_pulse
-                                        ? (pulse.credible ? 1.0 : 0.35) : 0.0);
+        if (!continuous) {
+            ran_a2 = true;
+            {
+                AnalysisResult *ar = node_begin(&envelopes, dag, "pulse",
+                                                DAG_A2, &node_t0);
+
+                ok_pulse = pulse_analyze(s, &sreg, &pulse);
+                if (ar != NULL) {
+                    apub_pulse(ar, &pulse);
+                    apub_set_confidence(ar, ok_pulse
+                                                ? (pulse.credible ? 1.0
+                                                                  : 0.35)
+                                                : 0.0);
+                }
+                node_end(ar, dag, DAG_A2, node_t0, ok_pulse, NULL);
+            }
+            job_advance(job, &done, "pulse-train analysis", &stage_start);
+        } else {
+            node_skip(&envelopes, dag, "pulse", DAG_A2,
+                      "the detected modulation is continuous, so there is "
+                      "no pulse train to segment");
         }
-        node_end(ar, dag, DAG_A2, node_t0, ok_pulse, NULL);
     }
-    job_advance(job, &done, "pulse-train analysis", &stage_start);
     if (job->cancelled) {
         goto cancelled_out;
     }
@@ -2571,6 +2736,25 @@ static gpointer report_worker(gpointer data)
     if (!skip_a4[0] && !ran_a4) {
         skip_a4 = "not selected by the DAG";
     }
+    } else {
+        /* the candidate-first flow already identified the signal: record
+         * every remaining node as skipped with the filter's rationale */
+        skip_a4 = rest_reason;
+        skip_a5 = rest_reason;
+        skip_a6 = rest_reason;
+        skip_a7 = rest_reason;
+        skip_a8 = rest_reason;
+        skip_a9 = rest_reason;
+        node_skip(&envelopes, dag, "classic", DAG_A1, rest_reason);
+        node_skip(&envelopes, dag, "pulse", DAG_A2, rest_reason);
+        node_skip(&envelopes, dag, "hos", DAG_A3, rest_reason);
+        node_skip(&envelopes, dag, "cyclic", DAG_A4, rest_reason);
+        node_skip(&envelopes, dag, "ssca", DAG_A5, rest_reason);
+        node_skip(&envelopes, dag, "cycledet", DAG_A6, rest_reason);
+        node_skip(&envelopes, dag, "fluct", DAG_A7, rest_reason);
+        node_skip(&envelopes, dag, "ccc", DAG_A8, rest_reason);
+        node_skip(&envelopes, dag, "intraburst", DAG_A9, rest_reason);
+    }
 
     /* (The execution plan is not printed: each analysis section below
      * already states EXECUTED/SKIPPED with its rationale.) */
@@ -2723,6 +2907,16 @@ static gpointer report_worker(gpointer data)
         in.n_mods = job->job_mod_count;
         in.ids = job->job_ids;
         in.n_ids = job->job_ids_count;
+        in.preselect_names = preselect_names;
+        in.n_preselect = n_preselect_names;
+        in.filtered_names = filtered_names;
+        in.n_filtered = n_filtered_names;
+        in.mod_family = mod_family_name;
+        in.mod_family_conf = mod_family_conf;
+        in.mod_reliable = mod_reliable;
+        in.rest_warranted = rest_warranted;
+        in.rest_reason = rest_warranted ? rest_reason
+                                        : rest_reason;
         in.spread = spread;
         in.n_spread = spread_n;
         in.anomaly = job->anomaly != 0;

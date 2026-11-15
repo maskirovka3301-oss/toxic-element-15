@@ -149,6 +149,14 @@ SIGNAL CHARACTERISATION (SYNTHESIS)
 -----------------------------------
 Selection 0.400 s at 2.000 MHz | analysis image 205 x 200 bins/frames (bin 976.56 Hz, dt 0.001995 s)
 
+0. CANDIDATE-FIRST IDENTIFICATION FLOW [database pre-selection -> modulation -> candidate filter -> DAG decision]
+   Pre-selection: 1 candidate is possible from the measured centre and approximate bandwidth alone (no analysis, no modulation evidence)
+     1. FM Broadcast
+   Modulation determination: OOK/pulsed (confidence 94 %) -> RELIABLE - the family is decisive
+   Candidate filter: 0 of the 1 preselected candidates match the detected modulation
+   DAG decision: remaining analyses WANTED - none of the 1 preselected candidates has the detected OOK/pulsed modulation
+     They ran in increasing specialisation: classic envelope -> pulse train -> HOS -> cycle search -> detectors -> cumulants/fluctuation -> intra-burst, each only when the accumulated evidence warranted it.
+
 1. FREQUENCY, POWER AND CLASSIFIER [analysis + metrics]
    Occupied bandwidth 198.2 kHz (99.900-100.099 MHz) [99% power containment of the selection spectrum]; measured selection bandwidth 200.0 kHz
    Power: average -23.21 dB, peak 43.96 dB; entropy 15.296 bits [Shannon entropy of the spectrogram]
@@ -202,9 +210,12 @@ Selection 0.400 s at 2.000 MHz | analysis image 205 x 200 bins/frames (bin 976.5
 ANALYSIS PROVENANCE AND DIRECTOR RATIONALE
 ------------------------------------------
 DAG execution (node: state (elapsed) - reason):
-   A0 baseline analysis: executed (0.00 s)
    SOT common source: executed (0.00 s)
-   A1 classic analysis: executed (0.00 s)
+   Candidate pre-selection (frequency + bandwidth): executed (0.00 s)
+   A0 baseline analysis: executed (0.00 s)
+   Modulation determination: executed (0.00 s)
+   Candidate filtering + DAG decision: executed (0.00 s)
+   A1 classic analysis (least specialised): executed (0.00 s)
    A2 pulse-train analysis: executed (0.00 s)
    A3 higher-order statistics: executed (0.00 s)
    A4 FAM spectral correlation: executed (0.00 s)

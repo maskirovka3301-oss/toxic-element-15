@@ -96,6 +96,24 @@ extern const KnownSignal signal_db[];
 extern const size_t      signal_db_size;
 
 /*
+ * Candidate-first identification helpers (used by the Spectrum DAG):
+ *   - signals_preselect(): entries that are POSSIBLE given only the measured
+ *     centre frequency and the approximate bandwidth (the band must contain
+ *     the centre and the bandwidth must be compatible with the documented
+ *     channel/occupied width). No modulation evidence is used.
+ *   - signals_family_from_mod_name(): map a modulation-candidate name to a
+ *     SignalFamily (-1 when it implies none).
+ *   - signals_filter_family(): keep the preselected candidates whose
+ *     documented modulation family matches the detected one.
+ * Both list helpers sort by descending frequency/bandwidth confidence.
+ */
+size_t signals_preselect(double center_freq, double bandwidth,
+                         SignalMatch *out, size_t max_matches);
+int    signals_family_from_mod_name(const char *name);
+size_t signals_filter_family(const SignalMatch *in, size_t n, int family,
+                             SignalMatch *out, size_t max_matches);
+
+/*
  * Score the database against an observed (center frequency, bandwidth)
  * pair and return the best matches, sorted by descending confidence.
  * `out` may be NULL if `max_matches` is 0. Returns the number of matches.

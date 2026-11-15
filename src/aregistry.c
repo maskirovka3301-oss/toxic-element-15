@@ -253,6 +253,22 @@ static const ArSettingDesc signals_settings[] = {
 };
 
 static const ArAnalysisDesc registry[] = {
+    { "candidates", "Candidate pre-selection", DAG_CANDIDATES,
+      (const ArParamDesc[]){ { "n_preselected", NULL, "candidates possible from centre + bandwidth" },
+                             { "bandwidth_hz", "Hz", "approximate bandwidth used" } },
+      2, NULL, 0 },
+    { "modulation", "Modulation determination", DAG_MODULATION,
+      (const ArParamDesc[]){ { "family", NULL, "detected modulation family" },
+                             { "confidence", "%", "family confidence" },
+                             { "reliable", NULL, "1 when the family is decisive" },
+                             { "n_candidates", NULL, "modulation candidates" } },
+      4, NULL, 0 },
+    { "filter", "Candidate filtering", DAG_FILTER,
+      (const ArParamDesc[]){ { "n_matched", NULL, "candidates matching the family" },
+                             { "rest_warranted", NULL, "1 when the remaining DAG must run" },
+                             { "matched", NULL, "top matching candidate names" },
+                             { "reason", NULL, "why the rest does / does not run" } },
+      4, NULL, 0 },
     { "analysis", "Baseline analysis", DAG_A0, analysis_params,
       sizeof(analysis_params) / sizeof(analysis_params[0]), NULL, 0 },
     { "metrics", "Signal metrics", DAG_A0, metrics_params,

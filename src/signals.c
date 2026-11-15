@@ -811,6 +811,88 @@ static int base_confidence(const KnownSignal *s, double center_freq,
     return confidence;
 }
 
+static int modconf_family(const char *name);
+
+/* Modulate-candidate name -> SignalFamily (public wrapper around the
+ * internal table used by the ranking). */
+int signals_family_from_mod_name(const char *name)
+{
+    return modconf_family(name);
+}
+
+/* Candidate pre-selection from the measured centre frequency and the
+ * approximate bandwidth only: the band must contain the centre, and the
+ * measured width must be compatible with the documented channel width (when
+ * a spec exists) or with the entry's occupied-bandwidth window. No
+ * modulation, symbol-rate or pulse evidence is used here. */
+size_t signals_preselect(double center_freq, double bandwidth,
+                         SignalMatch *out, size_t max_matches)
+{
+    SignalMatch *pool;
+    size_t np = 0;
+
+    if (max_matches == 0 || out == NULL) return 0;
+    pool = calloc(signal_db_size, sizeof(*pool));
+    if (pool == NULL) return 0;
+    for (size_t i = 0; i < signal_db_size; i++) {
+        const KnownSignal *s = &signal_db[i];
+        const SignalSpec *sp = signal_spec_find(s->name);
+        bool bw_ok = true;
+
+        if (center_freq < s->freq_min || center_freq > s->freq_max) continue;
+        if (bandwidth > 0.0) {
+            if (sp != NULL && sp->channel_bw > 0.0) {
+                double r = bandwidth / sp->channel_bw;
+
+                if (r > 1.0) r = 1.0 / r;
+                bw_ok = r >= 0.25;
+            } else {
+                bw_ok = bandwidth >= s->bw_min / 4.0 &&
+                        bandwidth <= s->bw_max * 4.0;
+            }
+        }
+        if (!bw_ok) continue;
+        pool[np].signal = s;
+        pool[np].confidence = base_confidence(s, center_freq, bandwidth);
+        np++;
+    }
+    for (size_t i = 1; i < np; i++) {
+        SignalMatch key = pool[i];
+        size_t j = i;
+
+        while (j > 0 && pool[j - 1].confidence < key.confidence) {
+            pool[j] = pool[j - 1];
+            j--;
+        }
+        pool[j] = key;
+    }
+    for (size_t i = 0; i < np && i < max_matches; i++) out[i] = pool[i];
+    free(pool);
+    return np < max_matches ? np : max_matches;
+}
+
+/* Filter preselected candidates by the detected modulation family. A
+ * candidate whose documented family is UNKNOWN cannot be ruled out by the
+ * modulation evidence, so it is kept after the matching entries. */
+size_t signals_filter_family(const SignalMatch *in, size_t n, int family,
+                             SignalMatch *out, size_t max_matches)
+{
+    size_t count = 0;
+
+    if (out == NULL || max_matches == 0) return 0;
+    for (size_t i = 0; i < n && count < max_matches; i++) {
+        if (family >= 0 && (int)in[i].signal->family != family) continue;
+        out[count++] = in[i];
+    }
+    if (family >= 0 && count < max_matches) {
+        for (size_t i = 0; i < n && count < max_matches; i++) {
+            if ((int)in[i].signal->family != SIG_FAM_UNKNOWN) continue;
+            out[count++] = in[i];
+        }
+    }
+    return count;
+}
+
 size_t signals_match(double center_freq, double bandwidth,
                      SignalMatch *out, size_t max_matches) {
     size_t count = 0;

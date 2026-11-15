@@ -100,6 +100,47 @@ from the selection, copy that part of the recording out of the memory
 map into a private heap buffer (capped at 32 M samples ≈ 256 MB), and
 run entirely on the buffer — the mmap is never touched during analysis.
 
+## Candidate-first Spectrum DAG
+
+The Spectrum analysis flow is organised around the signal database instead
+of running every analysis first and identifying afterwards:
+
+1. **SOT** prepares the shared source from the selection alone.
+2. **Candidate pre-selection** (`signals_preselect()`) lists every database
+   entry that is POSSIBLE from the measured centre frequency and the
+   approximate selection bandwidth alone — the band must contain the centre
+   and the measured width must be compatible with the documented channel /
+   occupied width. No analysis and no modulation evidence is involved.
+3. **A0 baseline** computes the spectrogram, the measured metrics and the
+   classifier labels (the modulation evidence).
+4. **Modulation determination** derives the modulation family from the A0
+   results only (classifier label + metric vector + modulation-consensus
+   scores). It is *reliable* when the best candidate scores >= 70 and leads
+   the runner-up by >= 15 points.
+5. **Candidate filtering** keeps the preselected candidates whose documented
+   modulation family matches the detected one. The DAG decision is then:
+   * modulation reliable AND at least one candidate matches -> the
+     identification is conclusive and the remaining analyses A1..A9 are
+     SKIPPED (each records that rationale);
+   * modulation unreliable OR no candidate matches -> the remaining analyses
+     run, starting with the least specialised.
+6. **Remaining analyses** run only in this inconclusive case, in increasing
+   specialisation: A1 classic envelope analysis first, then A2 pulse-train
+   segmentation only when the signature is not a reliably detected
+   continuous modulation (AM/FM/CW/chirp), then A3 higher-order statistics,
+   then the cycle-frequency search (A4 FAM or A5 SSCA on the measured
+   flatness/PAPR/occupied-bandwidth criterion), the A6 detector validation,
+   A7 ACF fluctuation / A8 cyclic cumulants, and A9 intra-burst analysis
+   only when a burst train was actually found. Each later node runs only if
+   the evidence accumulated so far warrants it, and every skipped node keeps
+   its rationale for the report.
+
+The synthesis report therefore documents the method itself: section
+"0. CANDIDATE-FIRST IDENTIFICATION FLOW" prints the preselected candidates,
+the detected modulation family and its reliability, the filtered candidates
+and the resulting decision (remaining analyses warranted or not), before the
+measurement/analysis sections and the final ranked catalogue identification.
+
 ## Prior-agnostic analyses
 
 Every analysis of the Spectrum DAG is **prior-agnostic**: its only inputs
@@ -119,14 +160,13 @@ such data itself. Consequences:
   SSCA choice no longer reads a modulation-classifier label; it uses the
   measured flatness/PAPR/occupied-bandwidth criterion, and its skip text
   says so.
-* the known-signal database match is performed in the SYNTHESIS STEP, after
-  the DAG: it consumes the measured results (modulation consensus, metrics,
-  pulse train) and publishes the ranked catalogue candidates, their
-  validity and the anomaly verdict, which the report shows in its
-  "SYSTEM IDENTIFICATION (database match, synthesis step only)" section.
-  Nothing from this match is passed to any analysis, so it cannot influence
-  the prior-agnostic analysis results; the registry entry exists so the
-  match has a documented place in the synthesis/report pipeline.
+* the database is consulted by the candidate pre-selection/filtering nodes
+  and by the final ranked match in the synthesis step; the measurement
+  analyses A1..A9 remain prior-agnostic and never receive database entries.
+  The synthesis ranking consumes the measured results (modulation consensus,
+  metrics, pulse train) and publishes the ranked catalogue candidates, their
+  validity and the anomaly verdict, shown in the report's "SYSTEM
+  IDENTIFICATION (database match, synthesis step only)" section.
 * the same synthesis-step ranking also seeds the Selection page's LTE
   demodulator hint (a post-analysis identification aid); it never feeds the
   analysis DAG and never changes the analysis results.

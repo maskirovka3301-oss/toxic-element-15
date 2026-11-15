@@ -97,6 +97,16 @@ typedef struct {
     size_t                 n_mods;
     const RankedMatch     *ids;
     size_t                 n_ids;
+    /* candidate-first identification flow */
+    const char *const     *preselect_names;
+    size_t                 n_preselect;
+    const char *const     *filtered_names;
+    size_t                 n_filtered;
+    const char            *mod_family;      /* detected family label     */
+    int                    mod_family_conf; /* 0..100                    */
+    bool                   mod_reliable;
+    bool                   rest_warranted;
+    const char            *rest_reason;
     const SpreadCandidate *spread;
     size_t                 n_spread;
     bool                   anomaly;

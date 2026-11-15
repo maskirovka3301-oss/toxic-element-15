@@ -666,6 +666,51 @@ static void report_body(ReportInput *in, RepBuf *b, ReportDoc *doc)
             analysis.duration, src->sample_rate / 1e6, analysis.bins,
             analysis.frames, analysis.bin_hz, analysis.dt);
 
+        /* 0. candidate-first identification flow */
+        rb_puts(b, "0. CANDIDATE-FIRST IDENTIFICATION FLOW [database "
+                             "pre-selection -> modulation -> candidate "
+                             "filter -> DAG decision]\n");
+        rb_printf(b,
+            "   Pre-selection: %zu candidate%s %s possible from the "
+            "measured centre and approximate bandwidth alone "
+            "(no analysis, no modulation evidence)\n",
+            in->n_preselect, in->n_preselect == 1 ? "" : "s",
+            in->n_preselect == 1 ? "is" : "are");
+        for (size_t i = 0; i < in->n_preselect && i < 6; i++) {
+            rb_printf(b, "     %zu. %s\n", i + 1, in->preselect_names[i]);
+        }
+        rb_printf(b,
+            "   Modulation determination: %s (confidence %d %%) -> %s\n",
+            in->mod_family != NULL ? in->mod_family : "unknown",
+            in->mod_family_conf,
+            in->mod_reliable
+                ? "RELIABLE - the family is decisive"
+                : "not reliable - ambiguous family / weak margin");
+        rb_printf(b,
+            "   Candidate filter: %zu of the %zu preselected candidates "
+            "match the detected modulation\n", in->n_filtered,
+            in->n_preselect);
+        for (size_t i = 0; i < in->n_filtered && i < 6; i++) {
+            rb_printf(b, "     %zu. %s\n", i + 1, in->filtered_names[i]);
+        }
+        rb_printf(b,
+            "   DAG decision: remaining analyses %s - %s\n",
+            in->rest_warranted ? "WANTED" : "NOT WANTED",
+            in->rest_reason != NULL ? in->rest_reason
+                                    : "no rationale recorded");
+        if (!in->rest_warranted) {
+            rb_puts(b, "     The deeper analyses (A1..A9) were skipped: "
+                               "the candidate filter already identified the "
+                               "modulation family and the matching bands.\n");
+        } else if (in->ran.a1) {
+            rb_puts(b, "     They ran in increasing specialisation: "
+                               "classic envelope -> pulse train -> HOS -> "
+                               "cycle search -> detectors -> cumulants/"
+                               "fluctuation -> intra-burst, each only when "
+                               "the accumulated evidence warranted it.\n");
+        }
+        rb_puts(b, "\n");
+
         /* 1. frequency, power, classifier */
         rb_puts(b, "1. FREQUENCY, POWER AND CLASSIFIER "
                              "[analysis + metrics]\n");

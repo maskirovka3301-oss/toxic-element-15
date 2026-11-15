@@ -16,9 +16,12 @@
 #include "dagcore.h"
 
 typedef enum {
-    DAG_A0 = 0, /* baseline analysis + metrics + signal ranking        */
-    DAG_SOT,    /* common source of truth preparation                 */
-    DAG_A1,     /* classic analysis                                   */
+    DAG_SOT = 0,  /* common source of truth preparation               */
+    DAG_CANDIDATES,/* database pre-selection from frequency/bandwidth  */
+    DAG_A0,       /* baseline analysis + metrics                      */
+    DAG_MODULATION,/* modulation-family determination                 */
+    DAG_FILTER,   /* modulation-family filtering + DAG decision       */
+    DAG_A1,       /* classic analysis (least specialised)             */
     DAG_A2,     /* pulse-train analysis                               */
     DAG_A3,     /* higher-order statistics                            */
     DAG_A4,     /* cyclic spectral correlation (FAM)                  */
@@ -26,9 +29,9 @@ typedef enum {
     DAG_A6,     /* cycle detectors (cycledet + CPAR)                  */
     DAG_A7,     /* autocorrelation fluctuation (Burel)                */
     DAG_A8,     /* cyclic cumulants (AMR)                             */
-    DAG_A9,     /* intra-burst envelope                               */
-    DAG_MODCONF,/* modulation consensus ranking (post-DAG aggregation) */
-    DAG_SSCLASS,/* spread-spectrum classification (post-DAG)          */
+    DAG_A9,       /* intra-burst envelope                            */
+    DAG_MODCONF,  /* modulation consensus (post-DAG aggregation)     */
+    DAG_SSCLASS,  /* spread-spectrum classification (post-DAG)      */
     DAG_NODES
 } DagNode;
 
