@@ -21,43 +21,13 @@ void sot_clear(Sot *out)
     memset(out, 0, sizeof(*out));
 }
 
-/* value at a percentile (sorts a copy) */
-static double percentile_of(const double *v, size_t n, double p)
-{
-    double *tmp;
-    double val = 0.0;
-
-    if (n == 0) return 0.0;
-    tmp = malloc(n * sizeof(double));
-    if (tmp == NULL) return 0.0;
-    memcpy(tmp, v, n * sizeof(double));
-    for (size_t i = 0; i + 1 < n; i++) {
-        for (size_t j = i + 1; j < n; j++) {
-            if (tmp[j] < tmp[i]) {
-                double t = tmp[i];
-
-                tmp[i] = tmp[j];
-                tmp[j] = t;
-            }
-        }
-    }
-    {
-        size_t idx = (size_t)(p * (double)(n - 1));
-
-        if (idx >= n) idx = n - 1;
-        val = tmp[idx];
-    }
-    free(tmp);
-    return val;
-}
-
 /*
- * Wideband PSD of the prepared slice, used to derive the context filter:
- * the noise floor (median), the selection's own spectral extent (passband
- * at least 1.5x the selection bandwidth, extended while the selection's
- * spectrum stays within 25 dB of its peak) and the first frequency farther
- * out that falls to the noise floor + 6 dB (which also respects
- * neighbouring emissions).
+ * PSD of the prepared selection slice, used ONLY to derive the band filter
+ * and the noise floor from data inside the user's selection: the passband is
+ * the selected bandwidth itself, the stopband a fixed transition outside it,
+ * and the noise floor is the median of the in-band PSD bins. No wideband or
+ * neighbouring-emission context is consulted - the analyses are given the
+ * selected IQ samples and the selected bandwidth, nothing else.
  */
 static bool derive_filter(const float *iq, size_t n, double fs,
                           double sel_bw, double *pass_hz, double *stop_hz,
@@ -69,13 +39,11 @@ static bool derive_filter(const float *iq, size_t n, double fs,
     double hann[256];
     size_t psd_n = SOT_PSD_N;
     size_t blocks = 0;
-    double peak = -1e300;
-    double floor_med = 1e-20;
     bool ok = false;
 
     *pass_hz = *stop_hz = 0.0;
     *floor_db = -200.0;
-    if (n < psd_n) return false;
+    if (n < psd_n || sel_bw <= 0.0 || fs <= 0.0) return false;
     blk = malloc(2 * psd_n * sizeof(float));
     spec = malloc(psd_n * sizeof(float));
     psd = calloc(psd_n, sizeof(double));
@@ -124,51 +92,36 @@ static bool derive_filter(const float *iq, size_t n, double fs,
     {
         size_t prof_n = psd_n / 2;
         double bin_hz = fs / (double)psd_n;
-        size_t k;
         size_t k0 = (size_t)(0.5 * sel_bw / bin_hz);
-        double p90;
+        double *inband;
+        size_t inband_n = 0;
 
         if (k0 >= prof_n) k0 = prof_n - 1;
-        for (k = 0; k <= k0; k++) {
-            if (psd[k] > peak) peak = psd[k];
+        inband = malloc((k0 + 1) * sizeof(*inband));
+        if (inband == NULL) {
+            free(psd);
+            return false;
         }
-        /* noise floor from the upper percentile (a lower median could sit
-         * in the signal itself for a wide selection) */
-        p90 = percentile_of(psd, prof_n, 0.90);
-        floor_med = percentile_of(psd, prof_n, 0.50);
-        if (floor_med > p90 * 0.5) floor_med = p90 * 0.1;
-        *floor_db = 10.0 * log10(floor_med + 1e-20);
-        if (peak > 0.0) {
+        /* the in-band PSD bins: the noise floor is their median */
+        for (size_t k = 0; k <= k0; k++) inband[inband_n++] = psd[k];
+        for (size_t i = 0; i + 1 < inband_n; i++) {
+            for (size_t j = i + 1; j < inband_n; j++) {
+                if (inband[j] < inband[i]) {
+                    double t = inband[i];
+
+                    inband[i] = inband[j];
+                    inband[j] = t;
+                }
+            }
+        }
+        *floor_db = 10.0 * log10(inband[inband_n / 2] + 1e-30);
+        free(inband);
+        {
             double pass_edge = 0.5 * sel_bw;
-            double stop_edge = 0.0;
-            double floor6 = floor_med * 4.0; /* +6 dB */
+            double stop_edge = pass_edge * 1.35;
 
-            for (k = (size_t)(0.5 * sel_bw / bin_hz); k < prof_n; k++) {
-                if (psd[k] < peak * 10.0 / 316.0) { /* -25 dB */
-                    break;
-                }
-            }
-            pass_edge = fabs((double)k * bin_hz);
-            if (pass_edge < 0.75 * sel_bw) pass_edge = 0.75 * sel_bw;
-            for (k = (size_t)(pass_edge / bin_hz) + 1; k < prof_n; k++) {
-                if (psd[k] < floor6) {
-                    stop_edge = (double)k * bin_hz;
-                    break;
-                }
-            }
-            if (stop_edge <= pass_edge) stop_edge = pass_edge * 1.35;
-            if (stop_edge > pass_edge * 1.35) stop_edge = pass_edge * 1.35;
-            {
-                double trans = stop_edge - pass_edge;
-
-                if (trans < 0.15 * pass_edge) {
-                    stop_edge = pass_edge + 0.15 * pass_edge;
-                    trans = stop_edge - pass_edge;
-                }
-                if (trans > 0.60 * pass_edge) {
-                    stop_edge = pass_edge + 0.60 * pass_edge;
-                }
-            }
+            if (stop_edge > 0.49 * fs) stop_edge = 0.49 * fs;
+            if (stop_edge <= pass_edge) stop_edge = pass_edge * 1.05;
             *pass_hz = pass_edge;
             *stop_hz = stop_edge;
             ok = true;

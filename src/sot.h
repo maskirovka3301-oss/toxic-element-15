@@ -6,13 +6,17 @@
  *   - the selection's TIME range copied across the FULL original band, at
  *     the original sample rate (no decimation, no frequency extraction);
  *   - mixed down at the selection centre;
- *   - band-filtered with settings derived from the wideband context
- *     (noise floor, the selection's own spectral extent, neighbouring
- *     emissions) so the OOK/ASK edge sidelobes are preserved while
- *     everything farther away is rejected.
+ *   - band-filtered with settings derived ONLY from the user's selection
+ *     (the selected bandwidth defines the passband, a fixed transition the
+ *     stopband, and the in-band PSD the noise floor): no wideband context,
+ *     neighbouring emissions or other data outside the selection is
+ *     consulted, because the analyses must be prior-agnostic.
  *
  * The buffer is exposed as a pseudo-IqSource so every analysis reads the
- * same data through the existing API. Each analysis may still decimate
+ * same data through the existing API. Together with the settings and the
+ * results published by analyses that ran earlier, this is the ONLY input
+ * every analysis gets: no signal database, known-signal hint or wideband
+ * context is passed to them. Each analysis may still decimate
  * for cost, but only by the factor dsp_decimation_for() allows - a fixed
  * low target rate would alias and throw away the source resolution.
  */

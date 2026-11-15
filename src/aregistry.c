@@ -169,22 +169,6 @@ static const ArParamDesc ssclass_params[] = {
     { "cand3_score", NULL, "third score" },
 };
 
-static const ArParamDesc signals_params[] = {
-    { "rank1_name", NULL, "best database match" },
-    { "rank1_score", NULL, "its confidence" },
-    { "rank1_valid", NULL, "1 when it complies with its specification" },
-    { "rank2_name", NULL, "second match" },
-    { "rank2_score", NULL, "second confidence" },
-    { "rank2_valid", NULL, "second validity" },
-    { "rank3_name", NULL, "third match" },
-    { "rank3_score", NULL, "third confidence" },
-    { "rank3_valid", NULL, "third validity" },
-    { "anomaly", NULL, "1 when no candidate is valid" },
-    { "anomaly_note", NULL, "why" },
-    { "validity_n", NULL, "number of valid matches" },
-    { "validity_total", NULL, "number of matches" },
-};
-
 static const ArSettingDesc pulse_settings[] = {
     { "jitter_frac_reject", AR_SET_NUMBER, 0.60, 0, false, NULL,
       "reject a train when more pulses jitter than this", 0.05, 2.0, 0.05 },
@@ -247,11 +231,6 @@ static const ArSettingDesc ssclass_settings[] = {
       0, 0, 0 },
 };
 
-static const ArSettingDesc signals_settings[] = {
-    { "rank_max", AR_SET_INT, 5, 5, false, NULL,
-      "database matches kept", 1, 5, 1 },
-};
-
 static const ArAnalysisDesc registry[] = {
     { "analysis", "Baseline analysis", DAG_A0, analysis_params,
       sizeof(analysis_params) / sizeof(analysis_params[0]), NULL, 0 },
@@ -293,9 +272,6 @@ static const ArAnalysisDesc registry[] = {
     { "ssclass", "Spread-spectrum classification", DAG_SSCLASS, ssclass_params,
       sizeof(ssclass_params) / sizeof(ssclass_params[0]), ssclass_settings,
       sizeof(ssclass_settings) / sizeof(ssclass_settings[0]) },
-    { "signals", "Signal database match", DAG_A0, signals_params,
-      sizeof(signals_params) / sizeof(signals_params[0]), signals_settings,
-      sizeof(signals_settings) / sizeof(signals_settings[0]) },
     { "sot", "Common source of truth", DAG_SOT,
       (const ArParamDesc[]){ { "pass_hz", "Hz", "filter passband edge" },
                              { "stop_hz", "Hz", "filter stopband edge" },

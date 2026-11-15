@@ -100,6 +100,40 @@ from the selection, copy that part of the recording out of the memory
 map into a private heap buffer (capped at 32 M samples ≈ 256 MB), and
 run entirely on the buffer — the mmap is never touched during analysis.
 
+## Prior-agnostic analyses
+
+Every analysis of the Spectrum DAG is **prior-agnostic**: its only inputs
+are the raw IQ samples of the user's selection (through the prepared source
+buffer), its own settings from the registry, and the results published by
+analyses that ran earlier. No known-signal database entry, band/allocation
+assumption, hint from a previous identification or any other external
+a-priori information is passed into an analysis, and no analysis consults
+such data itself. Consequences:
+
+* `sot_prepare()` prepares the shared buffer from the selection alone: the
+  passband is the selected bandwidth, the stopband a fixed transition
+  outside it, and the noise floor is the median of the in-band PSD. It no
+  longer inspects the wideband context or neighbouring emissions.
+* the DAG's branch decisions use measured quantities only (spectral
+  flatness, PAPR, occupied bandwidth, detector/cyclic results). The FAM vs
+  SSCA choice no longer reads a modulation-classifier label; it uses the
+  measured flatness/PAPR/occupied-bandwidth criterion, and its skip text
+  says so.
+* the "signals" analysis (known-signal database match) is removed from the
+  analysis registry, the analysis envelopes and the Director input. The
+  report's identification section now states explicitly that no catalogue
+  is consulted and that identifying the emitter would require external
+  reference data.
+* the UI still offers a separate, clearly post-analysis *identification
+  aid* on the Selection page (database ranking used to seed the LTE
+  demodulator and shown in the details pane); it is not an analysis node,
+  never feeds the analysis DAG and never changes the analysis results or
+  the report's characterisation.
+
+The golden report was regenerated for this change (the SOT filter values and
+the FAM/SSCA branch follow the new selection-only inputs, and the ranked
+database section is replaced by the identification-policy statement).
+
 ## Extended analysis suite & demodulation
 
 `metrics_compute()` measures, over the selected region:
@@ -112,7 +146,9 @@ OOK / OFDM / CHIRP / NOISE — thresholds are regression-tested against
 synthetic recordings of each class. `signals_rank()` re-ranks the known-
 signal database by base confidence plus measured-parameter agreement
 (occupied-bandwidth containment ±15, class-keyword +15), giving a ranked
-top-3. FM/AM/CW selections expose "Demodulate Audio": mixdown to the
+top-3. This database matching is a separate UI identification aid (and the
+legacy interactive details view); it is **not** part of the prior-agnostic
+analysis DAG and never feeds the analysis results or report. FM/AM/CW selections expose "Demodulate Audio": mixdown to the
 region centre, discriminator/envelope/beat-note demodulation, box-
 filter decimation to 32 kHz mono, and a 16-bit WAV via `wav_write`.
 

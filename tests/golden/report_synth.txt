@@ -3,11 +3,14 @@ SELECTION REPORT
 Recording: gqrx_20261112_190000_100000000_2000000_fc.raw | 0.500 s at 2.000 MHz | center 100.000000 MHz | Float32
 Selection: 99.900000 - 100.100000 MHz | 0.000 - 0.400 s | bandwidth 200.00 kHz | duration 0.400 s | samples 800000
 Settings: 2.000 MHz, Float32, center 100.000000 MHz, FFT 32768, window Rectangular
-Common source: full-band slice of the selection (0.400 s, 800000 complex samples at 2.000 MHz, no decimation), normalised with a uniform real gain x0.5269 (-5.57 dB, raw RMS 0.1898 -> target 0.10: phase and frequency preserved, divide by the gain to recover the original amplitudes), mixed at 100.000000 MHz, band filter +/-150.0 kHz pass / +/-172.5 kHz stop (22.5 kHz transition, zero-phase mask, wideband floor 6.9 dB)
+Common source: full-band slice of the selection (0.400 s, 800000 complex samples at 2.000 MHz, no decimation), normalised with a uniform real gain x0.5269 (-5.57 dB, raw RMS 0.1898 -> target 0.10: phase and frequency preserved, divide by the gain to recover the original amplitudes), mixed at 100.000000 MHz, band filter +/-100.0 kHz pass / +/-135.0 kHz stop (35.0 kHz transition, zero-phase mask, wideband floor 20.6 dB)
 
-SPECTRAL CORRELATION - FAM (SKIPPED)
-------------------------------------
-Not executed: wideband/OFDM-like input: the heavier SSCA search covers the cycle frequencies, so the conventional FAM estimate was not needed
+SPECTRAL CORRELATION - FAM
+--------------------------
+Grid: 1024 x 1024 | alpha resolution: 488.28 Hz | effective rate: 500000.0 Hz
+Peaks: 0
+Coherence threshold: 1.557 (P_FA threshold: 0.190)
+Significant cycle frequencies: 0
 
 SPECTRAL CORRELATION - SSCA
 ---------------------------
@@ -18,72 +21,72 @@ Threshold: 0.030 | Significant cycle frequencies: 64
 3. +50000.5 Hz (coherence 1.000)
 4. +50040.5 Hz (coherence 1.000)
 5. +80.0 Hz (coherence 0.887)
-6. +49920.5 Hz (coherence 0.837)
-7. +50080.5 Hz (coherence 0.820)
+6. +49920.5 Hz (coherence 0.838)
+7. +50080.5 Hz (coherence 0.824)
 8. +120.0 Hz (coherence 0.593)
 9. +24999.0 Hz (coherence 0.577)
 10. +49880.5 Hz (coherence 0.564)
-11. +25039.0 Hz (coherence 0.546)
-12. +50120.5 Hz (coherence 0.543)
+11. +50120.5 Hz (coherence 0.547)
+12. +25039.0 Hz (coherence 0.546)
 13. +24959.0 Hz (coherence 0.534)
-14. +25079.0 Hz (coherence 0.449)
+14. +25079.0 Hz (coherence 0.448)
 15. +24919.0 Hz (coherence 0.427)
 16. +25119.0 Hz (coherence 0.306)
-17. +24879.0 Hz (coherence 0.280)
+17. +24879.0 Hz (coherence 0.281)
 18. +160.0 Hz (coherence 0.278)
 19. +49840.5 Hz (coherence 0.269)
 20. +280.0 Hz (coherence 0.253)
-21. +50160.5 Hz (coherence 0.249)
-22. +49720.5 Hz (coherence 0.239)
-23. +50280.5 Hz (coherence 0.235)
+21. +50160.5 Hz (coherence 0.251)
+22. +50280.5 Hz (coherence 0.241)
+23. +49720.5 Hz (coherence 0.239)
 24. +320.0 Hz (coherence 0.223)
-25. +49680.5 Hz (coherence 0.212)
-26. +50320.5 Hz (coherence 0.205)
+25. +49680.5 Hz (coherence 0.213)
+26. +50320.5 Hz (coherence 0.210)
 27. +240.0 Hz (coherence 0.180)
-28. +50240.5 Hz (coherence 0.173)
+28. +50240.5 Hz (coherence 0.176)
 29. +49760.5 Hz (coherence 0.169)
-30. +25159.0 Hz (coherence 0.150)
+30. +25159.0 Hz (coherence 0.149)
 31. +480.0 Hz (coherence 0.147)
-32. +49520.5 Hz (coherence 0.140)
-33. +520.0 Hz (coherence 0.138)
-34. +50480.5 Hz (coherence 0.136)
+32. +50480.5 Hz (coherence 0.142)
+33. +49520.5 Hz (coherence 0.140)
+34. +520.0 Hz (coherence 0.138)
 35. +49480.5 Hz (coherence 0.132)
-36. +50520.5 Hz (coherence 0.128)
+36. +50520.5 Hz (coherence 0.131)
 37. +24839.0 Hz (coherence 0.126)
 38. +25279.0 Hz (coherence 0.125)
 39. +360.0 Hz (coherence 0.125)
 40. +24719.0 Hz (coherence 0.123)
 41. +49640.5 Hz (coherence 0.121)
-42. +25319.0 Hz (coherence 0.114)
-43. +50360.5 Hz (coherence 0.114)
+42. +50360.5 Hz (coherence 0.114)
+43. +25319.0 Hz (coherence 0.114)
 44. +24679.0 Hz (coherence 0.106)
 45. +680.0 Hz (coherence 0.104)
-46. +720.0 Hz (coherence 0.100)
-47. +49320.5 Hz (coherence 0.100)
-48. +50680.5 Hz (coherence 0.099)
-49. +50440.5 Hz (coherence 0.097)
-50. +440.0 Hz (coherence 0.097)
-51. +49280.5 Hz (coherence 0.096)
-52. +50720.5 Hz (coherence 0.094)
+46. +50680.5 Hz (coherence 0.102)
+47. +720.0 Hz (coherence 0.100)
+48. +49320.5 Hz (coherence 0.099)
+49. +440.0 Hz (coherence 0.097)
+50. +50440.5 Hz (coherence 0.097)
+51. +50720.5 Hz (coherence 0.097)
+52. +49280.5 Hz (coherence 0.096)
 53. +49560.5 Hz (coherence 0.092)
 54. +24759.0 Hz (coherence 0.091)
 55. +25239.0 Hz (coherence 0.084)
 56. +560.0 Hz (coherence 0.082)
 57. +880.1 Hz (coherence 0.080)
-58. +920.1 Hz (coherence 0.078)
-59. +49440.5 Hz (coherence 0.078)
-60. +49120.4 Hz (coherence 0.078)
-61. +50560.5 Hz (coherence 0.077)
-62. +49080.4 Hz (coherence 0.076)
-63. +50880.6 Hz (coherence 0.076)
-64. +50920.6 Hz (coherence 0.075)
+58. +50880.6 Hz (coherence 0.079)
+59. +49440.5 Hz (coherence 0.079)
+60. +920.1 Hz (coherence 0.079)
+61. +49120.4 Hz (coherence 0.078)
+62. +50920.6 Hz (coherence 0.076)
+63. +49080.4 Hz (coherence 0.076)
+64. +50560.5 Hz (coherence 0.075)
 Note: SSCA: N'=64 N=49997 strips=32 | 64 significant modulation-rate cycle frequencies (carrier-independent, beta = q/(P*L); conjugate alpha=2f features live on the k axis)
 
 CYCLE DETECTORS (CFAR)
 ----------------------
-Detected: yes | Best CF: +49804.7 Hz (stat 0.657)
-Candidates: 257 | Threshold: 0.224 | Multi-cycle: 0.980 vs 0.448 | Whitened: on
-Note: Cycle detector: SIGNAL PRESENT - strongest cyclic autocorrelation at 49804.69 Hz (0.6573 vs threshold 0.2238; multi-cycle 0.9797).
+Detected: yes | Best CF: +49804.7 Hz (stat 0.658)
+Candidates: 257 | Threshold: 0.224 | Multi-cycle: 0.981 vs 0.448 | Whitened: on
+Note: Cycle detector: SIGNAL PRESENT - strongest cyclic autocorrelation at 49804.69 Hz (0.6577 vs threshold 0.2238; multi-cycle 0.9807).
 
 AUTOCORRELATION FLUCTUATION (SKIPPED)
 -------------------------------------
@@ -92,38 +95,38 @@ Not executed: validated cyclic features are present, so the spread-spectrum/nois
 CPAR
 ----
 Detected: yes
-Lags: 8193 | CPAR: 261.1 | CPAR (all): 2123.3 | Threshold: 25.0
+Lags: 8193 | CPAR: 261.2 | CPAR (all): 2123.3 | Threshold: 25.0
 Code period: 3.8000 ms | Chip rate: 263.2 Hz
-Note: DSSS-like signal detected: CPAR 261.1 over 10 significant peak(s); strongest PAR 27.2 at lag 0.02 ms (code period), chip period ~3800.0 us (chip rate ~0.3 kHz)
+Note: DSSS-like signal detected: CPAR 261.2 over 10 significant peak(s); strongest PAR 27.2 at lag 0.02 ms (code period), chip period ~3800.0 us (chip rate ~0.3 kHz)
 
 INTRA-BURST ENVELOPE
 --------------------
 Synchronisation: 16 bursts detected on a 10.0 us RMS envelope; burst period 40.05 Hz from the envelope spectrum; 16 bursts aligned and folded (coherence 0.99 -> phase-coherent complex average)
-Folded burst 5.045 ms | amplitude model: on 0.331 / off 0.018 | segmentation: 245 sub-pulses, 4/4 detectors confirming, Delta-BIC 1692, surrogate false-alarm 0%
-Sub-pulse: width 9.90 us (CV 4%) | spacing 20.01 us (CV 0%) | rise 3.40 us | duty 48% | SNR 25.2 dB | matched-filter 0.98
-Intra-pulse frequency span 36.10 kHz | FSK steps 2
-Modulation hypotheses: unmodulated clock (PPM/PWM/PFM constant) - width CV 5.0%, interval CV 0.0%: a fixed pulse train
-Per-burst classification (16 bursts isolated): clock 31%, PFM 50% -> no combination (clock single class)
-Candidate fit: single class preferred: best pair PPM + PFM only 2*DeltaLL -18.6 vs threshold 2.8
+Folded burst 5.057 ms | amplitude model: on 0.331 / off 0.019 | segmentation: 245 sub-pulses, 4/4 detectors confirming, Delta-BIC 1020, surrogate false-alarm 0%
+Sub-pulse: width 9.92 us (CV 3%) | spacing 20.01 us (CV 0%) | rise 3.41 us | duty 48% | SNR 25.0 dB | matched-filter 0.98
+Intra-pulse frequency span 35.77 kHz | FSK steps 2
+Modulation hypotheses: unmodulated clock (PPM/PWM/PFM constant) - width CV 0.0%, interval CV 0.0%: a fixed pulse train
+Per-burst classification (13 bursts isolated): clock 8%, PFM 77% -> no combination (clock single class)
+Candidate fit: single class preferred: best pair PPM + PFM only 2*DeltaLL -8.0 vs threshold 2.6
 Verdict: uniform intra-burst pulse train (clock/preamble)
 
 HIGHER-ORDER STATISTICS
 -----------------------
-C20: -0.000251 +0.000052j | C21: 0.008882
-C30: +0.000221 +0.000695j | C31: +0.000171 +0.001650j
-C40: -0.000173 +0.000000j | C41: -0.000069 +0.000014j | C42: 0.000566
+C20: -0.000255 +0.000053j | C21: 0.008878
+C30: +0.000220 +0.000693j | C31: +0.000170 +0.001649j
+C40: -0.000174 +0.000000j | C41: -0.000070 +0.000015j | C42: 0.000564
 C60: -0.000005 +0.000003j | C63: 0.000017
-Normalised: |C40|/C21^2 2.1978 | |C41|/C21^2 0.8955 | |C42|/C21^2 7.1686 | Kurtosis 7.169
+Normalised: |C40|/C21^2 2.2026 | |C41|/C21^2 0.9073 | |C42|/C21^2 7.1595 | Kurtosis 7.160
 Gaussian threshold: 0.0274 (N = 800000) | Non-Gaussian: yes
-Hint: higher-order QAM / multi-level (C42 = 7.169 > 0)
-Note: Non-Gaussian signal detected: |C42|/C21^2 = 7.1686 vs Gaussian threshold 0.0274 (N = 800000). higher-order QAM / multi-level (C42 = 7.169 > 0).
+Hint: higher-order QAM / multi-level (C42 = 7.160 > 0)
+Note: Non-Gaussian signal detected: |C42|/C21^2 = 7.1595 vs Gaussian threshold 0.0274 (N = 800000). higher-order QAM / multi-level (C42 = 7.160 > 0).
 
 CYCLIC TEMPORAL CUMULANTS
 -------------------------
-|C40(4fc)|/P^2: 2.8743 | |C41(2fc)|/P^2: 1.8257 | |C42(2fc)|/P^2: 8.1014
-Power: 9.287e-03 | Carrier: 100000000.0 Hz | Samples: 800000
+|C40(4fc)|/P^2: 2.8783 | |C41(2fc)|/P^2: 1.8375 | |C42(2fc)|/P^2: 8.0933
+Power: 9.283e-03 | Carrier: 100000000.0 Hz | Samples: 800000
 Verdict: BPSK-like
-Note: Cyclic temporal cumulants (fc 100.000 MHz, N 800000): |C40(4fc)|/P^2 = 2.874, |C41(2fc)|/P^2 = 1.826, |C42(2fc)|/P^2 = 8.101 -> BPSK-like.
+Note: Cyclic temporal cumulants (fc 100.000 MHz, N 800000): |C40(4fc)|/P^2 = 2.878, |C41(2fc)|/P^2 = 1.837, |C42(2fc)|/P^2 = 8.093 -> BPSK-like.
 
 CLASSIC ANALYSIS
 ----------------
@@ -135,12 +138,12 @@ Note: period 40.0 Hz (envelope ACF; cepstrum 0.0 @ mag 0.000, AMDF 6250.0, envel
 
 PULSE TRAIN
 -----------
-Pulses: 16 | tau: 4.976 ms | T: 25.000 ms | PRF: 40.0 Hz | Duty: 20 %
-IPI: 20.025 ms | Rise: 2.0 us | Fall: 4975.6 us | Jitter: 29.6 us | IPI std: 29.6 us
-Peak amplitude: 0.177 | RMS: 0.096
+Pulses: 16 | tau: 4.989 ms | T: 24.999 ms | PRF: 40.0 Hz | Duty: 20 %
+IPI: 20.010 ms | Rise: 2.0 us | Fall: 4989.2 us | Jitter: 4.9 us | IPI std: 4.9 us
+Peak amplitude: 0.175 | RMS: 0.096
 f0: 38.1 Hz | Sinc null: 175.5 Hz | Tau (sinc): 5.699 ms
 Modulation: constant-PRF train
-Note: Pulse train: 16 pulses, tau 4.976 ms, T 25.000 ms, PRF 40.0 Hz, duty 19.9%, IPI 20.025 ms, rise 2.0 us, fall 4975.6 us, Vpeak 0.177, Arms 0.096, jitter 29.59 us, f0 38.1 Hz, constant-PRF train
+Note: Pulse train: 16 pulses, tau 4.989 ms, T 24.999 ms, PRF 40.0 Hz, duty 20.0%, IPI 20.010 ms, rise 2.0 us, fall 4989.2 us, Vpeak 0.175, Arms 0.096, jitter 4.89 us, f0 38.1 Hz, constant-PRF train
 
 SIGNAL CHARACTERISATION (SYNTHESIS)
 -----------------------------------
@@ -149,25 +152,25 @@ Selection 0.400 s at 2.000 MHz | analysis image 205 x 200 bins/frames (bin 976.5
 1. FREQUENCY, POWER AND CLASSIFIER [analysis + metrics]
    Occupied bandwidth 198.2 kHz (99.900-100.099 MHz) [99% power containment of the selection spectrum]; measured selection bandwidth 200.0 kHz
    Power: average -23.21 dB, peak 43.96 dB; entropy 15.296 bits [Shannon entropy of the spectrogram]
-   SNR 42.1 dB [spectral], flatness 0.006 [Wiener entropy], band symmetry +0.944, PAPR 10.9 dB, tone purity 0.419
+   SNR 42.1 dB [spectral], flatness 0.006 [Wiener entropy], band symmetry +0.944, PAPR 10.8 dB, tone purity 0.419
    Classifier: 'Wideband' / 'QAM/OFDM'; demodulable no (n/a) - Pulsed emission (duty 11.7%, envelope depth 100%) - bursty train; check the Pulse Trains tab for tau/PRF
 
 2. TIME STRUCTURE [envelope, classic analysis, spectrogram frames]
-   Envelope character: pulsed [smoothed |x| variation CV 195%, duty at the mean 12%, AM depth 100%]
-   Pulse-train segmentation: ACCEPTED - 16 pulses, width 4.976 ms, period 25.000 ms, duty 20%, jitter 29.6 us [threshold + hysteresis on the envelope]
+   Envelope character: pulsed [smoothed |x| variation CV 196%, duty at the mean 12%, AM depth 100%]
+   Pulse-train segmentation: ACCEPTED - 16 pulses, width 4.989 ms, period 24.999 ms, duty 20%, jitter 4.9 us [threshold + hysteresis on the envelope]
    Burst/modulation rate 38.15 Hz (26.214 ms period) [envelope line-spectrum fundamental]
    Corroboration: frame-level fluctuation 39.39 Hz [spectrogram frame power, dt-limited] agrees (3% difference)
-   Intra-burst envelope: uniform intra-burst pulse train (clock/preamble) [16 bursts folded at full rate (coherence 0.99), 245 sub-pulses, width 9.90 us (CV 4%), Delta-BIC 1692, 4/4 detectors]
+   Intra-burst envelope: uniform intra-burst pulse train (clock/preamble) [16 bursts folded at full rate (coherence 0.99), 245 sub-pulses, width 9.92 us (CV 3%), Delta-BIC 1020, 4/4 detectors]
    Corroboration: classic period 40.000 Hz [cepstrum/AMDF on the 50 kHz complex envelope] agrees (5% difference)
 
 3. MODULATION EVIDENCE [classifier, higher-order statistics, cyclic cumulants]
-   FM deviation 97.4 kHz [IF spread], FSK levels 0, symbol rate 249725.3 Hz (confidence 16%), chirp trend -0.017
+   FM deviation 71.1 kHz [IF spread], FSK levels 0, symbol rate 249725.3 Hz (confidence 16%), chirp trend -0.017
    Candidates (confidence, evidence):
      1. OOK / pulsed emission - 94 % (duty 12%, envelope depth 100%)
      2. BPSK - 85 % (cyclic cumulants: BPSK-like features)
      3. Pulsed radar / beacon - 70 % (constant-PRF pulse train)
    Votes: demod QAM | cumulants BPSK | HOS QAM | pulses constant-PRF -> majority QAM (2/4)
-   Intra-burst modulation: unmodulated clock (PPM/PWM/PFM constant) (per-burst: clock 31%, PFM 50%)
+   Intra-burst modulation: unmodulated clock (PPM/PWM/PFM constant) (per-burst: clock 8%, PFM 77%)
    Intra-burst evidence: uniform intra-burst train -> clock/preamble/PFM-supply signature rather than data
 
 4. CYCLOSTATIONARY AND SPREAD SPECTRUM [SSCA, cycle detectors, cyclic cumulants]
@@ -181,16 +184,8 @@ Selection 0.400 s at 2.000 MHz | analysis image 205 x 200 bins/frames (bin 976.5
    Cyclic cumulants: BPSK-like [C40/C42 at the candidate cycle frequency]
    Detector presence: 4/4 (cycle detector yes, HOS non-Gaussian, pulse train 16 pulses, DSSS no)
 
-5. SYSTEM IDENTIFICATION [ranked database match: frequency range, documented bandwidth, modulation family, symbol rate]
-   1. LORAN-C - 25 % INVALID (OOK-family evidence 94%; pulsed train matches; outside the licensed band)
-      reason: bandwidth 198.2 kHz does not match 20.0 kHz
-   2. FM Broadcast - 25 % INVALID (bandwidth matches 200 kHz channel)
-      reason: modulation (FM expected) does not conform
-   3. LTE PUSCH B1 - 25 % INVALID (OFDM-family evidence 60%; pulsed train matches; outside the licensed band)
-      reason: modulation (OFDM expected) does not conform
-   4. LTE PUCCH B1 - 25 % INVALID (bandwidth matches 180 kHz channel; OFDM-family evidence 60%; pulsed train matches; outside the licensed band)
-      reason: modulation (OFDM expected) does not conform
-   Validity 0/5 -> ANOMALY: no candidate conforms to its documented specification. Measured 100.000 MHz, 200.0 kHz. LORAN-C: 99.89 MHz outside its 0.09-0.11 MHz allocation; bandwidth 198.2 kHz does not match 20.0 kHz; FM Broadcast: modulation (FM expected) does not conform; LTE PUSCH B1: 1820 MHz outside its 1920-1980 MHz allocation; modulation (OFDM expected) does not conform
+5. IDENTIFICATION AND PRIOR INFORMATION
+   The analyses are prior-agnostic: they receive only the selected IQ samples, their own settings and the results published by analyses that ran earlier. No known-signal database, signal-type hint or external reference is consulted, so the characterisation above is derived entirely from the measurements; identifying the emitter against a catalogue would require external reference data and is deliberately not attempted here.
 
 6. VERDICT
    Best-supported characterisation: bursty emission with a OOK / pulsed signature: 5.0 ms bursts at 40.0 Hz (duty 20%); intra-burst: uniform train (clock/preamble-like)
@@ -203,7 +198,7 @@ DAG execution (node: state (elapsed) - reason):
    A1 classic analysis: executed (0.00 s)
    A2 pulse-train analysis: executed (0.00 s)
    A3 higher-order statistics: executed (0.00 s)
-   A4 FAM spectral correlation: skipped (0.00 s) - wideband/OFDM-like input: the heavier SSCA search covers the cycle frequencies, so the conventional FAM estimate was not needed
+   A4 FAM spectral correlation: executed (0.00 s)
    A5 SSCA: executed (0.00 s)
    A6 cycle detectors: executed (0.00 s)
    A7 autocorrelation fluctuation: skipped (0.00 s) - validated cyclic features are present, so the spread-spectrum/noise diagnostic was unnecessary
@@ -212,11 +207,10 @@ DAG execution (node: state (elapsed) - reason):
    modulation consensus: executed (0.00 s)
    spread-spectrum classification: executed (0.00 s)
 Director rationale:
-   1. A2 credible pulse train ranks first (width 4.976 ms, PRF 40.0 Hz)
+   1. A2 credible pulse train ranks first (width 4.989 ms, PRF 40.0 Hz)
    2. A9 intra-burst result ('uniform intra-burst pulse train (clock/preamble)') appended to the verdict
    3. ranking: 5 hypotheses ordered by weight; 'OOK / pulsed emission' leads at 94%
-   4. A4 FAM spectral correlation discounted: wideband/OFDM-like input: the heavier SSCA search covers the cycle frequencies, so the conventional FAM estimate was not needed
-   5. A7 autocorrelation fluctuation discounted: validated cyclic features are present, so the spread-spectrum/noise diagnostic was unnecessary
+   4. A7 autocorrelation fluctuation discounted: validated cyclic features are present, so the spread-spectrum/noise diagnostic was unnecessary
 Ranked hypotheses (weight, evidence):
    1. OOK / pulsed emission - 94 % (top modulation consensus candidate (score 94): duty 12%, envelope depth 100%)
    2. pulse-train emission - 75 % (A2 pulse train passed the credibility gate)

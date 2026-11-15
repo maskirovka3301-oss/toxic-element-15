@@ -2130,7 +2130,6 @@ static gpointer report_worker(gpointer data)
     /* job-local result structs — ui-> result structs are never touched */
     Analysis analysis;
     Metrics metrics;
-    RankedMatch ranked[3];
     CyclicResult cyclic;
     SscaResult ssca;
     CycleDetResult cycledet;
@@ -2197,7 +2196,7 @@ static gpointer report_worker(gpointer data)
 
     memset(&analysis, 0, sizeof(analysis));
     memset(&metrics, 0, sizeof(metrics));
-    memset(ranked, 0, sizeof(ranked));
+
     memset(&cyclic, 0, sizeof(cyclic));
     memset(&ssca, 0, sizeof(ssca));
     memset(&cycledet, 0, sizeof(cycledet));
@@ -2257,13 +2256,10 @@ static gpointer report_worker(gpointer data)
         ok_a0 = ok;
 
         if (ok) {
-            bool mok = metrics_compute(s, &sreg, &metrics);
-
-            if (mok) {
-                (void)signals_rank(analysis.center_freq, analysis.bandwidth,
-                                   &metrics, ranked,
-                                   sizeof(ranked) / sizeof(ranked[0]));
-            }
+            /* the analyses are prior-agnostic: the baseline publishes only
+             * quantities measured from the selected IQ (no known-signal
+             * database, hint or other a-priori identification is used) */
+            (void)metrics_compute(s, &sreg, &metrics);
         }
         {
             AnalysisResult *ar;
@@ -2351,10 +2347,10 @@ static gpointer report_worker(gpointer data)
     }
 
     /* decisions after A0..A3 */
+    /* Purely measured criterion (the analysis is prior-agnostic): no
+     * modulation-classifier label, known-signal match or hint is used. */
     d6_wideband = (metrics.spectral_flatness > 0.45 &&
                    metrics.papr_db > 7.0) ||
-                  (strstr(analysis.modulation, "QAM") != NULL) ||
-                  (strstr(analysis.modulation, "OFDM") != NULL) ||
                   (metrics.occupied_bw_hz > 0.2 * src->sample_rate);
 
     if (d6_wideband) {
@@ -2378,9 +2374,10 @@ static gpointer report_worker(gpointer data)
             goto cancelled_out;
         }
         d4_have_cf = ok_ssca && (ssca.cf_count > 0);
-        skip_a4 = "wideband/OFDM-like input: the heavier SSCA search covers "
-                  "the cycle frequencies, so the conventional FAM estimate "
-                  "was not needed";
+        skip_a4 = "wideband/flat-spectrum input (measured spectral "
+                  "flatness/PAPR/occupied bandwidth): the heavier SSCA "
+                  "search covers the cycle frequencies, so the conventional "
+                  "FAM estimate was not needed";
         node_skip(&envelopes, dag, "cyclic", DAG_A4, skip_a4);
     } else {
         /* D6 no: conventional cyclostationary analysis (A4) */
@@ -2591,7 +2588,17 @@ static gpointer report_worker(gpointer data)
                                           &hos, &pulse, &fluct, &cpar,
                                           job->job_mods, (size_t)mc);
     }
-    {
+    /* The analysis pipeline is prior-agnostic: no known-signal database
+     * match, anomaly check or hint is computed from or fed into the DAG.
+     * A separate UI identification aid (Selection page) may still rank
+     * database candidates for the demodulator, but that is not an analysis
+     * and never influences the analysis results or this report. */
+    job->job_ids_count = 0;
+    job->anomaly = 0;
+    job->anomaly_explain[0] = '\0';
+    job->measured_bw_hz = analysis.bandwidth;
+    job->measured_center_hz = analysis.center_freq;
+    if (job->update_only) {
         int rk = aconfig_get_int("signals", "rank_max", 5);
 
         if (rk < 1) rk = 1;
@@ -2601,14 +2608,13 @@ static gpointer report_worker(gpointer data)
                                                job->job_mods,
                                                job->job_mod_count, &pulse,
                                                job->job_ids, (size_t)rk);
-        job->measured_bw_hz = analysis.bandwidth;
-        job->measured_center_hz = analysis.center_freq;
+        job->anomaly = signals_anomaly_check(analysis.center_freq,
+                                             analysis.bandwidth,
+                                             job->job_ids,
+                                             job->job_ids_count,
+                                             job->anomaly_explain,
+                                             sizeof(job->anomaly_explain));
     }
-    job->anomaly = signals_anomaly_check(analysis.center_freq,
-                                         analysis.bandwidth,
-                                         job->job_ids, job->job_ids_count,
-                                         job->anomaly_explain,
-                                         sizeof(job->anomaly_explain));
     {
         AnalysisResult *ar = ar_add(&envelopes, "modconf",
                                     "Modulation consensus", DAG_MODCONF);
@@ -2620,15 +2626,7 @@ static gpointer report_worker(gpointer data)
                                         ? job->job_mods[0].score / 100.0 : 0.0);
             dag_end(dag, DAG_MODCONF, true, 0.0);
         }
-        ar = ar_add(&envelopes, "signals", "Signal database match", DAG_A0);
-        if (ar != NULL) {
-            aregistry_apply_settings(ar);
-            apub_signals(ar, job->job_ids, job->job_ids_count, job->anomaly,
-                         job->anomaly_explain);
-            apub_set_confidence(ar, job->job_ids_count > 0
-                                        ? job->job_ids[0].confidence_pct /
-                                              100.0 : 0.0);
-        }
+
     }
     if (job->update_only) {
         const char *mode = (metrics.demod_mode[0] != '\0')
