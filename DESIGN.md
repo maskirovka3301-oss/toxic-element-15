@@ -119,20 +119,22 @@ such data itself. Consequences:
   SSCA choice no longer reads a modulation-classifier label; it uses the
   measured flatness/PAPR/occupied-bandwidth criterion, and its skip text
   says so.
-* the "signals" analysis (known-signal database match) is removed from the
-  analysis registry, the analysis envelopes and the Director input. The
-  report's identification section now states explicitly that no catalogue
-  is consulted and that identifying the emitter would require external
-  reference data.
-* the UI still offers a separate, clearly post-analysis *identification
-  aid* on the Selection page (database ranking used to seed the LTE
-  demodulator and shown in the details pane); it is not an analysis node,
-  never feeds the analysis DAG and never changes the analysis results or
-  the report's characterisation.
+* the known-signal database match is performed in the SYNTHESIS STEP, after
+  the DAG: it consumes the measured results (modulation consensus, metrics,
+  pulse train) and publishes the ranked catalogue candidates, their
+  validity and the anomaly verdict, which the report shows in its
+  "SYSTEM IDENTIFICATION (database match, synthesis step only)" section.
+  Nothing from this match is passed to any analysis, so it cannot influence
+  the prior-agnostic analysis results; the registry entry exists so the
+  match has a documented place in the synthesis/report pipeline.
+* the same synthesis-step ranking also seeds the Selection page's LTE
+  demodulator hint (a post-analysis identification aid); it never feeds the
+  analysis DAG and never changes the analysis results.
 
-The golden report was regenerated for this change (the SOT filter values and
-the FAM/SSCA branch follow the new selection-only inputs, and the ranked
-database section is replaced by the identification-policy statement).
+The golden report was regenerated for this change (the SOT filter values
+and the FAM/SSCA branch follow the selection-only inputs, and the
+"SYSTEM IDENTIFICATION" section now shows the synthesis-step catalogue
+matches marked as not part of any analysis input).
 
 ## Extended analysis suite & demodulation
 

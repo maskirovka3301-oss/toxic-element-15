@@ -896,16 +896,56 @@ static void report_body(ReportInput *in, RepBuf *b, ReportDoc *doc)
             (bchip > 0.0 && cchip > 0.0 && dsss_label[0] == 's') ? "yes"
                                                                 : "no");
 
-        /* 5. identification policy (prior-agnostic analyses) */
-        rb_puts(b, "5. IDENTIFICATION AND PRIOR INFORMATION\n");
-        rb_puts(b, "   The analyses are prior-agnostic: they receive only the "
-                   "selected IQ samples, their own settings and the results "
-                   "published by analyses that ran earlier. No known-signal "
-                   "database, signal-type hint or external reference is "
-                   "consulted, so the characterisation above is derived "
-                   "entirely from the measurements; identifying the emitter "
-                   "against a catalogue would require external reference "
-                   "data and is deliberately not attempted here.\n");
+        /* 5. system identification (synthesis step) */
+        rb_puts(b, "5. SYSTEM IDENTIFICATION (database match, synthesis "
+                   "step only)\n");
+        rb_puts(b, "   The analyses are prior-agnostic; this catalogue match "
+                   "is computed after the DAG from the measured results and "
+                   "never feeds back into any analysis.\n");
+        {
+            size_t n_valid = 0;
+
+            for (size_t i = 0; i < in->n_ids; i++) {
+                if (in->ids[i].valid) {
+                    n_valid++;
+                }
+            }
+            for (size_t i = 0; i < in->n_ids && i < 4; i++) {
+                const RankedMatch *m = &in->ids[i];
+
+                rb_printf(b, "   %zu. %s - %d %% %s", i + 1,
+                                       m->signal->name, m->confidence_pct,
+                                       m->valid ? "VALID" : "INVALID");
+                if (m->why[0] != '\0') {
+                    rb_printf(b, " (%s)", m->why);
+                }
+                rb_puts(b, "\n");
+                if (!m->valid && m->invalid_reason[0] != '\0') {
+                    rb_printf(b, "      reason: %s\n",
+                                           m->invalid_reason);
+                }
+            }
+            if (in->n_ids == 0) {
+                rb_puts(b, "   (no catalogue candidate matched the "
+                           "measured parameters)\n");
+            } else if (in->anomaly) {
+                rb_printf(b,
+                    "   Validity %zu/%zu -> ANOMALY: %s\n", n_valid,
+                    in->n_ids,
+                    in->anomaly_explain[0] != '\0'
+                        ? (strncmp(in->anomaly_explain, "ANOMALY: ",
+                                   strlen("ANOMALY: ")) == 0
+                               ? in->anomaly_explain + strlen("ANOMALY: ")
+                               : in->anomaly_explain)
+                        : "no candidate conforms to its specification");
+            } else {
+                rb_printf(b,
+                    "   Validity %zu/%zu -> no anomaly: at least one "
+                    "candidate complies with the measured frequency, "
+                    "bandwidth and modulation\n", n_valid,
+                    in->n_ids);
+            }
+        }
 
         /* 6. verdict */
         rb_printf(b,

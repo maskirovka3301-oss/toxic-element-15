@@ -2588,17 +2588,12 @@ static gpointer report_worker(gpointer data)
                                           &hos, &pulse, &fluct, &cpar,
                                           job->job_mods, (size_t)mc);
     }
-    /* The analysis pipeline is prior-agnostic: no known-signal database
-     * match, anomaly check or hint is computed from or fed into the DAG.
-     * A separate UI identification aid (Selection page) may still rank
-     * database candidates for the demodulator, but that is not an analysis
-     * and never influences the analysis results or this report. */
-    job->job_ids_count = 0;
-    job->anomaly = 0;
-    job->anomaly_explain[0] = '\0';
-    job->measured_bw_hz = analysis.bandwidth;
-    job->measured_center_hz = analysis.center_freq;
-    if (job->update_only) {
+    /* Synthesis step: match the catalogue against the measured results.
+     * This happens AFTER the DAG and is the only place the known-signal
+     * database is consulted; the analyses themselves remain prior-agnostic
+     * and never receive these candidates. The ranking uses the measured
+     * frequency/bandwidth/modulation consensus/pulse results above. */
+    {
         int rk = aconfig_get_int("signals", "rank_max", 5);
 
         if (rk < 1) rk = 1;
@@ -2608,13 +2603,14 @@ static gpointer report_worker(gpointer data)
                                                job->job_mods,
                                                job->job_mod_count, &pulse,
                                                job->job_ids, (size_t)rk);
-        job->anomaly = signals_anomaly_check(analysis.center_freq,
-                                             analysis.bandwidth,
-                                             job->job_ids,
-                                             job->job_ids_count,
-                                             job->anomaly_explain,
-                                             sizeof(job->anomaly_explain));
+        job->measured_bw_hz = analysis.bandwidth;
+        job->measured_center_hz = analysis.center_freq;
     }
+    job->anomaly = signals_anomaly_check(analysis.center_freq,
+                                         analysis.bandwidth,
+                                         job->job_ids, job->job_ids_count,
+                                         job->anomaly_explain,
+                                         sizeof(job->anomaly_explain));
     {
         AnalysisResult *ar = ar_add(&envelopes, "modconf",
                                     "Modulation consensus", DAG_MODCONF);
@@ -2626,7 +2622,16 @@ static gpointer report_worker(gpointer data)
                                         ? job->job_mods[0].score / 100.0 : 0.0);
             dag_end(dag, DAG_MODCONF, true, 0.0);
         }
-
+        ar = ar_add(&envelopes, "signals", "Signal database match",
+                    DAG_MODCONF);
+        if (ar != NULL) {
+            aregistry_apply_settings(ar);
+            apub_signals(ar, job->job_ids, job->job_ids_count, job->anomaly,
+                         job->anomaly_explain);
+            apub_set_confidence(ar, job->job_ids_count > 0
+                                        ? job->job_ids[0].confidence_pct /
+                                              100.0 : 0.0);
+        }
     }
     if (job->update_only) {
         const char *mode = (metrics.demod_mode[0] != '\0')
