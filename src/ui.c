@@ -4308,7 +4308,15 @@ static void on_open_menu(GtkMenuItem *item, gpointer user_data)
 #define ABOUT_TEXT_B 0.76
 
 static GtkWidget *about_window = NULL;
+static GtkWidget *about_support_button = NULL;
+static GtkWidget *about_support_fixed = NULL;
 static cairo_surface_t *about_image = NULL;
+
+/* where the "Support Us" button leads */
+static const char *about_support_url(void)
+{
+    return "https://stripe.com/@radiodefense";
+}
 
 /* Decode the embedded About artwork (an image in the executable; nothing is
  * read from disk at run time). The surface is cached. */
@@ -4442,6 +4450,16 @@ static gboolean about_key_press(GtkWidget *widget, GdkEventKey *event,
 {
     (void)widget;
     if (about_window == NULL) return FALSE;
+    /* while the Support Us button has the focus, Return/Space activate it
+     * (they must not close the About screen) */
+    if (about_support_button != NULL &&
+        gtk_window_get_focus(GTK_WINDOW(about_window)) ==
+            about_support_button &&
+        (event->keyval == GDK_KEY_Return ||
+         event->keyval == GDK_KEY_KP_Enter ||
+         event->keyval == GDK_KEY_space)) {
+        return FALSE;
+    }
     if (event->keyval == GDK_KEY_Escape || event->keyval == GDK_KEY_Return ||
         event->keyval == GDK_KEY_KP_Enter) {
         about_close(NULL, NULL, user_data);
@@ -4468,6 +4486,111 @@ static void about_on_destroy(GtkWidget *widget, gpointer user_data)
     (void)widget;
     (void)user_data;
     about_window = NULL;
+    about_support_button = NULL;
+    about_support_fixed = NULL;
+}
+
+/* Position the button after the fixed container has been allocated (done in
+ * an idle callback so moving a child during the parent's allocate does not
+ * get overwritten by the same allocation pass). */
+static gboolean about_support_place_idle(gpointer data)
+{
+    GtkWidget *fixed = about_support_fixed;
+    GtkWidget *btn = about_support_button;
+    GtkAllocation allocation;
+    GtkRequisition req;
+
+    (void)data;
+    if (fixed == NULL || btn == NULL) return G_SOURCE_REMOVE;
+    gtk_widget_get_allocation(fixed, &allocation);
+    if (allocation.width <= 0 || allocation.height <= 0) {
+        return G_SOURCE_REMOVE;
+    }
+    gtk_widget_get_preferred_size(btn, &req, NULL);
+    gtk_fixed_move(GTK_FIXED(fixed), btn,
+                   (allocation.width - req.width) / 2,
+                   (int)((double)allocation.height * 0.85) - req.height / 2);
+    return G_SOURCE_REMOVE;
+}
+
+/* Place the Support Us button on the vertical halfway point between the
+ * "2026" line (baseline h * 0.70) and the bottom edge, centred horizontally. */
+static void about_support_place(GtkWidget *fixed, GtkAllocation *allocation,
+                                gpointer data)
+{
+    (void)fixed;
+    (void)allocation;
+    (void)data;
+    g_idle_add(about_support_place_idle, NULL);
+}
+
+/* Open https://stripe.com/@radiodefense in the system's default browser. */
+static void on_about_support_clicked(GtkButton *button, gpointer user_data)
+{
+    GError *err = NULL;
+
+    (void)button;
+    (void)user_data;
+    if (!g_app_info_launch_default_for_uri(about_support_url(), NULL, &err)) {
+        /* fallback for systems without a registered URI handler */
+        const char *opener =
+#ifdef __APPLE__
+            "open";
+#elif defined(_WIN32)
+            "rundll32 url.dll,FileProtocolHandler";
+#else
+            "xdg-open";
+#endif
+        gchar *cmd = g_strdup_printf("%s \"%s\"", opener,
+                                     about_support_url());
+
+        if (err != NULL) {
+            g_error_free(err);
+            err = NULL;
+        }
+        g_spawn_command_line_async(cmd, &err);
+        if (err != NULL) g_error_free(err);
+        g_free(cmd);
+    }
+}
+
+/* The Support Us button: a dark, pale-green, outlined button that matches
+ * the About overlay text. */
+static GtkWidget *about_support_button_new(void)
+{
+    GtkWidget *btn = gtk_button_new_with_label("Support Us");
+    GtkCssProvider *css = gtk_css_provider_new();
+
+    gtk_widget_set_name(btn, "te15-support-button");
+    gtk_css_provider_load_from_data(css,
+        "#te15-support-button {"
+        "  background-image: none;"
+        "  background-color: rgba(3, 12, 6, 0.82);"
+        "  color: #b8f5c2;"
+        "  border: 2px solid #7fd18c;"
+        "  border-radius: 9px;"
+        "  padding: 8px 26px;"
+        "  font-weight: bold;"
+        "  font-size: 13pt;"
+        "  box-shadow: none;"
+        "}"
+        "#te15-support-button:hover {"
+        "  background-color: rgba(22, 58, 32, 0.95);"
+        "  border-color: #b8f5c2;"
+        "  color: #dfffe4;"
+        "}"
+        "#te15-support-button:active {"
+        "  background-color: rgba(70, 130, 80, 0.95);"
+        "}", -1, NULL);
+    gtk_style_context_add_provider(gtk_widget_get_style_context(btn),
+                                   GTK_STYLE_PROVIDER(css),
+                                   GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(css);
+    gtk_widget_set_tooltip_text(btn,
+        "Open the Radio Defense support page in your default browser");
+    g_signal_connect(btn, "clicked",
+                     G_CALLBACK(on_about_support_clicked), NULL);
+    return btn;
 }
 
 /* File > About: a full-window artwork with the version overlay. Click or
@@ -4508,7 +4631,20 @@ static void on_about_menu(GtkMenuItem *item, gpointer user_data)
                      G_CALLBACK(about_key_press), ui);
     g_signal_connect(about_window, "destroy",
                      G_CALLBACK(about_on_destroy), ui);
-    gtk_container_add(GTK_CONTAINER(about_window), drawing);
+    {
+        GtkWidget *overlay = gtk_overlay_new();
+        GtkWidget *fixed = gtk_fixed_new();
+
+        gtk_container_add(GTK_CONTAINER(overlay), drawing);
+        gtk_overlay_add_overlay(GTK_OVERLAY(overlay), fixed);
+        about_support_fixed = fixed;
+        about_support_button = about_support_button_new();
+        gtk_fixed_put(GTK_FIXED(fixed), about_support_button, 0, 0);
+        g_signal_connect(fixed, "size-allocate",
+                         G_CALLBACK(about_support_place),
+                         about_support_button);
+        gtk_container_add(GTK_CONTAINER(about_window), overlay);
+    }
     gtk_widget_show_all(about_window);
     /* the About screen owns the focus while it is up */
     gtk_window_set_focus(GTK_WINDOW(about_window), drawing);

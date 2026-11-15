@@ -248,9 +248,16 @@ dark-industrial artwork with **Toxic Element 15**, **RF Signals Intelligence**
 title and the lines below), **Daniel R. Azulay | Radio Defense** and
 **2026** overlaid in bold pale-green text with a black border. The artwork (`media/about.gif`) is
 converted to a C array by `tools/bin2c.c` at build time and **embedded in
-the executable**, so the screen never reads it from disk at run time; it
-closes only on an explicit user action (Escape/Return or the window's
-close button).
+the executable**, so the screen never reads it from disk at run time.
+
+A styled **Support Us** button sits on the vertical halfway point between
+the "2026" line and the bottom edge of the window: a dark translucent pill
+with a pale-green border and bold pale-green text (GTK CSS on the
+`te15-support-button` widget, positioned by a GtkFixed overlay sizing hook).
+Clicking it opens <https://stripe.com/@radiodefense> in the system's default
+browser via `g_app_info_launch_default_for_uri()` (with an `open`/`xdg-open`
+fallback). The screen closes only on an explicit user action (Escape/Return
+when the button does not have focus, or the window's close button).
 
 ## Main window layout
 
