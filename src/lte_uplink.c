@@ -318,6 +318,9 @@ bool lte_hint_from_analysis(LteHint *hint, const RankedMatch *ids, size_t n,
         const KnownSignal *sig = ids[i].signal;
 
         if (sig == NULL) continue;
+        /* only the LTE uplink channels: the exhaustive database also
+         * carries 5G NR PUSCH/PUCCH signatures, which are not LTE */
+        if (strncmp(sig->name, "LTE ", 4) != 0) continue;
         if (strstr(sig->name, "PUSCH") == NULL &&
             strstr(sig->name, "PUCCH") == NULL) {
             continue;

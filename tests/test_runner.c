@@ -845,7 +845,8 @@ static void test_lte_uplink_bands(void)
     CHECK(signal_spec_find("LTE PUCCH B3") != NULL);
     CHECK(signal_spec_find("LTE PUSCH B7") != NULL);
     CHECK(signal_spec_find("LTE PUSCH B20") != NULL);
-    CHECK(signal_spec_find("LTE TDD PUSCH B38/B41") != NULL);
+    CHECK(signal_spec_find("LTE PUSCH B41") != NULL);
+    CHECK(signal_spec_find("LTE PUSCH B7") != NULL);
     CHECK(signal_spec_find("5G NR PUSCH n78") != NULL);
     if (signal_spec_find("LTE PUCCH B3") != NULL) {
         CHECK_NEAR(signal_spec_find("LTE PUCCH B3")->channel_bw, 180000.0,
@@ -899,15 +900,40 @@ static void test_lte_uplink_bands(void)
      * Band 38 range, where the uplink may use the whole band */
     n = signals_rank_conf(2610e6, 10.0e6, NULL, NULL, 0, NULL, ranked,
                           (sizeof(ranked) / sizeof(ranked[0])));
-    CHECK(ranked_name_contains(ranked, n, "B38/B41", 1, NULL));
+    CHECK(ranked_name_contains(ranked, n, "PUSCH B41", 1, NULL));
     CHECK(!ranked_name_contains(ranked, n, "PUSCH B7", 1, NULL));
 
     /* 2650 MHz: outside Band 7's uplink but inside the TDD band 38/41,
      * where the uplink shares the whole band */
     n = signals_rank_conf(2650e6, 10.0e6, NULL, NULL, 0, NULL, ranked,
                           (sizeof(ranked) / sizeof(ranked[0])));
-    CHECK(ranked_name_contains(ranked, n, "B38/B41", 1, NULL));
+    CHECK(ranked_name_contains(ranked, n, "PUSCH B41", 1, NULL));
     CHECK(!ranked_name_contains(ranked, n, "PUSCH B7", 1, NULL));
+
+    /* exhaustive 3GPP database: 2530 MHz / 10 MHz is Band 7 uplink and
+     * Band 41/n41 TDD; the candidates must be those, and the old sparse
+     * database's Band 1/Band 3 entries must at most appear INVALID */
+    n = signals_rank_conf(2530e6, 10.0e6, NULL, NULL, 0, NULL, ranked,
+                          (sizeof(ranked) / sizeof(ranked[0])));
+    CHECK(ranked_name_contains(ranked, n, "PUSCH B7", 1, NULL));
+    CHECK(ranked_name_contains(ranked, n, "PUSCH B7", 1, NULL));
+    CHECK(ranked_name_contains(ranked, n, "B41", 1, NULL) ||
+          ranked_name_contains(ranked, n, "n41", 1, NULL));
+    for (size_t i = 0; i < n; i++) {
+        if (strstr(ranked[i].signal->name, "PUSCH B1") != NULL ||
+            strstr(ranked[i].signal->name, "PUSCH B3") != NULL) {
+            CHECK(!ranked[i].valid);
+        }
+    }
+    {
+        int v7 = 0, v41 = 0;
+
+        CHECK(ranked_name_contains(ranked, n, "PUSCH B7", 1, &v7));
+        CHECK(v7);
+        if (ranked_name_contains(ranked, n, "PUSCH B41", 1, &v41)) {
+            CHECK(v41);
+        }
+    }
 
     /* the 4.5 MHz figure is one 5 MHz carrier's active span, not a global
      * limit: a 10 MHz PUSCH allocation in Band 7 is legal */
@@ -2320,7 +2346,7 @@ static void test_signals_validity(void)
     Metrics m;
     PulseResult pu;
     ModCandidate mods[4];
-    RankedMatch ids[8];
+    RankedMatch ids[32];
     char explain[512];
 
     /* valid: GSM-like in the GSM 900 band */
@@ -2333,7 +2359,7 @@ static void test_signals_validity(void)
     memset(mods, 0, sizeof(mods));
     mods[0].score = 90;
     snprintf(mods[0].name, sizeof(mods[0].name), "FSK");
-    size_t n = signals_rank_conf(905e6, 195e3, &m, mods, 1, &pu, ids, 8);
+    size_t n = signals_rank_conf(905e6, 195e3, &m, mods, 1, &pu, ids, 32);
     CHECK(n >= 1);
     CHECK(ids[0].valid == 1);
     CHECK(signals_anomaly_check(905e6, 195e3, ids, n, explain,
@@ -2349,7 +2375,7 @@ static void test_signals_validity(void)
     memset(mods, 0, sizeof(mods));
     mods[0].score = 90;
     snprintf(mods[0].name, sizeof(mods[0].name), "OFDM / QAM");
-    n = signals_rank_conf(30e9, 5e6, &m, mods, 1, &pu, ids, 8);
+    n = signals_rank_conf(30e9, 5e6, &m, mods, 1, &pu, ids, 32);
     int anomaly = signals_anomaly_check(30e9, 5e6, ids, n, explain,
                                         sizeof(explain));
     printf("  anomaly 30GHz: flag=%d valid_candidates=%d | %s\n", anomaly,
@@ -2369,7 +2395,7 @@ static void test_signals_validity(void)
     memset(mods, 0, sizeof(mods));
     mods[0].score = 85;
     snprintf(mods[0].name, sizeof(mods[0].name), "FSK");
-    n = signals_rank_conf(460e6, 2e6, &m, mods, 1, &pu, ids, 8);
+    n = signals_rank_conf(460e6, 2e6, &m, mods, 1, &pu, ids, 32);
     anomaly = signals_anomaly_check(460e6, 2e6, ids, n, explain,
                                     sizeof(explain));
     printf("  anomaly bw: flag=%d | %s\n", anomaly, explain);
@@ -6279,7 +6305,7 @@ static void test_lte_hint(void)
 
     /* a non-LTE ranking produces no hint */
     memset(ids, 0, sizeof(ids));
-    ids[0].signal = find_signal("4G LTE 2600");
+    ids[0].signal = find_signal("GSM 900");
     ids[0].total = 110;
     CHECK(!lte_hint_from_analysis(&hint, ids, 1, 10.0e6, NULL, NULL, 0,
                                   &region));

@@ -148,7 +148,18 @@ OOK / OFDM / CHIRP / NOISE — thresholds are regression-tested against
 synthetic recordings of each class. `signals_rank()` re-ranks the known-
 signal database by base confidence plus measured-parameter agreement
 (occupied-bandwidth containment ±15, class-keyword +15), giving a ranked
-top-3. This database matching is a separate UI identification aid (and the
+top-N. The 3GPP part of the catalogue is exhaustive and generated from the
+published band tables: every E-UTRA band of 3GPP TS 36.101 (FDD/TDD/SDL/SUL
+and the NTN bands) contributes LTE PUSCH / PUCCH / PRACH (uplink) and DL
+signatures with its own uplink/downlink ranges and supported channel
+bandwidths; every NR band of TS 38.101-1/-2 (FR1, FR2, SUL/SDL and NTN)
+contributes 5G NR PUSCH / PUCCH / SSB / DL signatures with per-band
+subcarrier spacing and SSB width; every UTRA FDD band of TS 25.101 is
+included as a 5 MHz / 3.84 Mcps UMTS signature. The catalogue therefore
+matches at the band+channel level instead of guessing from a handful of
+example bands. The LTE demodulator hint only accepts names starting with
+"LTE ", so the NR PUSCH/PUCCH signatures in the same ranking are never
+mistaken for LTE uplink channels. This database matching is a separate UI identification aid (and the
 legacy interactive details view); it is **not** part of the prior-agnostic
 analysis DAG and never feeds the analysis results or report. FM/AM/CW selections expose "Demodulate Audio": mixdown to the
 region centre, discriminator/envelope/beat-note demodulation, box-
