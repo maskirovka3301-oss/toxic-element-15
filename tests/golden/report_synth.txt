@@ -186,15 +186,15 @@ Selection 0.400 s at 2.000 MHz | analysis image 205 x 200 bins/frames (bin 976.5
 
 5. SYSTEM IDENTIFICATION (database match, synthesis step only)
    The analyses are prior-agnostic; this catalogue match is computed after the DAG from the measured results and never feeds back into any analysis.
-   1. LORAN-C - 25 % INVALID (OOK-family evidence 94%; pulsed train matches; outside the licensed band)
-      reason: bandwidth 198.2 kHz does not match 20.0 kHz
-   2. FM Broadcast - 25 % INVALID (bandwidth matches 200 kHz channel)
+   1. FM Broadcast - 25 % INVALID (bandwidth matches 200 kHz channel)
       reason: modulation (FM expected) does not conform
-   3. LTE PUSCH B1 - 25 % INVALID (OFDM-family evidence 60%; pulsed train matches; outside the licensed band)
-      reason: modulation (OFDM expected) does not conform
-   4. LTE PUCCH B1 - 25 % INVALID (bandwidth matches 180 kHz channel; OFDM-family evidence 60%; pulsed train matches; outside the licensed band)
-      reason: modulation (OFDM expected) does not conform
-   Validity 0/5 -> ANOMALY: no candidate conforms to its documented specification. Measured 100.000 MHz, 200.0 kHz. LORAN-C: 99.89 MHz outside its 0.09-0.11 MHz allocation; bandwidth 198.2 kHz does not match 20.0 kHz; FM Broadcast: modulation (FM expected) does not conform; LTE PUSCH B1: 1820 MHz outside its 1920-1980 MHz allocation; modulation (OFDM expected) does not conform
+   2. EchoLink - 7 % INVALID
+      reason: bandwidth 198.2 kHz does not match 5.0 kHz
+   3. IRLP - 7 % INVALID
+      reason: bandwidth 198.2 kHz does not match 5.0 kHz
+   4. VHF TV - 4 % INVALID
+      reason: bandwidth 198.2 kHz does not match 6000.0 kHz; modulation (AM expected) does not conform
+   Validity 0/5 -> ANOMALY: no candidate conforms to its documented specification. Measured 100.000 MHz, 200.0 kHz. FM Broadcast: modulation (FM expected) does not conform; EchoLink: bandwidth 198.2 kHz does not match 5.0 kHz; IRLP: bandwidth 198.2 kHz does not match 5.0 kHz
 
 6. VERDICT
    Best-supported characterisation: bursty emission with a OOK / pulsed signature: 5.0 ms bursts at 40.0 Hz (duty 20%); intra-burst: uniform train (clock/preamble-like)

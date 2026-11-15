@@ -131,6 +131,14 @@ such data itself. Consequences:
   demodulator hint (a post-analysis identification aid); it never feeds the
   analysis DAG and never changes the analysis results.
 
+Candidate ordering puts valid matches first, then the entries whose
+licensed range actually contains the measured centre, then the higher
+confidence: a strong modulation-family mismatch (e.g. a spurious
+OOK/pulsed candidate) caps every invalid candidate at a low confidence, and
+without the in-band tie-break the list degenerated to out-of-band examples
+in database order (LORAN-C, Band 1/Band 3) instead of the bands the signal
+really occupies (Band 7/Band 41 at 2535.79 MHz).
+
 The golden report was regenerated for this change (the SOT filter values
 and the FAM/SSCA branch follow the selection-only inputs, and the
 "SYSTEM IDENTIFICATION" section now shows the synthesis-step catalogue

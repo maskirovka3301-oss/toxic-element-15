@@ -1251,14 +1251,29 @@ static size_t rank_core(double center_freq, double bandwidth,
         snprintf(pool[i].why, sizeof(pool[i].why), "%s", why);
     }
 
-    /* stable sort by descending total (valid candidates first) */
+    /* Stable sort: valid candidates first, then candidates whose measured
+     * centre actually lies INSIDE the licensed band, then by descending
+     * total. The in-band tie-break matters when a strong modulation-family
+     * mismatch invalidates every candidate and the confidence cap makes
+     * them all tie at 25: without it the list would be filled with
+     * out-of-band examples in database order instead of the bands the
+     * measured centre really belongs to. */
     for (size_t i = 1; i < np; i++) {
         RankedMatch key = pool[i];
         size_t j = i;
 
-        while (j > 0 && (pool[j - 1].total < key.total ||
-                         (pool[j - 1].total == key.total &&
-                          !pool[j - 1].valid && key.valid))) {
+        while (j > 0) {
+            const RankedMatch *prev = &pool[j - 1];
+            int before;
+
+            if (prev->valid != key.valid) {
+                before = key.valid && !prev->valid;
+            } else if (prev->in_band != key.in_band) {
+                before = key.in_band && !prev->in_band;
+            } else {
+                before = prev->total < key.total;
+            }
+            if (!before) break;
             pool[j] = pool[j - 1];
             j--;
         }

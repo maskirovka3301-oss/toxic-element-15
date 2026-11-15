@@ -935,6 +935,42 @@ static void test_lte_uplink_bands(void)
         }
     }
 
+    /* real-analysis case: 2535.79 MHz / 333.9 kHz with a strong OOK/pulsed
+     * candidate that invalidates the OFDM family. The in-band Band 7/Band 41
+     * entries must still rank above out-of-band examples (the old ordering
+     * filled the list with LORAN-C and Band 1/Band 3 because every invalid
+     * candidate was capped to 25 and ties kept database order). */
+    {
+        ModCandidate ook[1];
+        double center = 2535.789649e6, bw = 333889.0;
+        int first_out_of_band = -1;
+
+        memset(ook, 0, sizeof(ook));
+        snprintf(ook[0].name, sizeof(ook[0].name), "OOK / pulsed emission");
+        ook[0].score = 92;
+        n = signals_rank_conf(center, bw, NULL, ook, 1, NULL, ranked,
+                              (sizeof(ranked) / sizeof(ranked[0])));
+        CHECK(n > 0);
+        CHECK(ranked[0].in_band);
+        CHECK(strstr(ranked[0].signal->name, "B7") != NULL ||
+              strstr(ranked[0].signal->name, "n7") != NULL ||
+              strstr(ranked[0].signal->name, "B41") != NULL ||
+              strstr(ranked[0].signal->name, "n41") != NULL);
+        for (size_t i = 0; i < n; i++) {
+            if (!ranked[i].in_band) {
+                first_out_of_band = (int)i;
+                break;
+            }
+        }
+        CHECK(first_out_of_band != 0);   /* never an out-of-band candidate first */
+        if (first_out_of_band > 0) {
+            for (size_t i = (size_t)first_out_of_band; i < n; i++) {
+                CHECK(!ranked[i].in_band);
+            }
+        }
+        CHECK(ranked_name_contains(ranked, n, "PUSCH B7", 1, NULL));
+    }
+
     /* the 4.5 MHz figure is one 5 MHz carrier's active span, not a global
      * limit: a 10 MHz PUSCH allocation in Band 7 is legal */
     n = signals_rank_conf(2520e6, 9.0e6, NULL, NULL, 0, NULL, ranked,
